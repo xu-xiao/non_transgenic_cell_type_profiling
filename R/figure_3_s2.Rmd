@@ -1,0 +1,360 @@
+---
+title: "R code for Figure 3 - figure supplement 2 - Comparative analysis supporting figures"
+author: "Xiao Xu (xxu@rockefeller.edu)"
+date: "June 2018"
+output: 
+  html_document:
+    toc: yes
+  html_notebook:
+    toc: yes
+---
+
+This is an [R Markdown](http://rmarkdown.rstudio.com) Notebook. This notebook contains R code for figures and analyses related to Figure 3 - figure supplement 2 in the manuscript:
+
+Xu X, Stoyanova EI, Lemiesz A, Xing J, Mash DC, Heintz N (2018). Species and Cell-Type Properties of Classically Defined Human and Rodent Neurons and Glia.
+
+Specifically, this workflow will generate the heatmap to accompany IGV tracks and figures relating to length and GC bias in mouse human comparative analysis.
+
+Load libraries and functions:
+
+```{r warning = FALSE, message = FALSE}
+# source custom functions
+source("functions.R")
+
+# libraries for heatmaps and colors
+library(RColorBrewer)
+library(gplots)
+
+# libraries for plotting
+library(grid)
+library(gridExtra)
+
+# libraries for genome analysis
+library(GenomicRanges)
+library(rtracklayer)
+library(Rsamtools)
+
+# libraries for data manipulation
+library(reshape2)
+
+# work in the tidyverse
+library(tidyverse)
+```
+
+
+
+## Heatmap to accompany IGV tracks
+
+Import counts and create metadata
+
+```{r message = FALSE}
+# read in table of counts
+counts <- read_tsv("../data/rat_all_wg_counts.txt") %>%
+  select(-contains("uns"), -contains("purkinje"))
+meta <- tibble(
+  Sample = colnames(counts)[-1],
+  Cell_type = rep(
+    c("Granule", "Basket", "Astrocyte", "Oligo", "OPC"),
+    each = 2
+    )
+  )
+```
+
+
+Normalize counts by length using FPKM (RPKM) calculation:
+
+```{r message = FALSE}
+# read in gene lengths
+lengths <- read_tsv("../data/ref/rat_ensembl_wg_lengths.txt", 
+                    col_names = c("Gene", "Length"))
+
+# calculate rpkms
+rpkms <- getNormCounts(counts, lengths, type = "RPKM")
+```
+
+Genes to visualize
+
+```{r}
+igv_genes <- c("Fat2", "Vwc2", "Cnksr3", 
+               "March11", "Lmcd1", "Mpp7",
+               "Slc1a3", "Rgcc", "Mybpc1",
+               "Mog", "Gldn", "Kcnk13",
+               "Pdgfra", "Scn9a", "Lpcat2")
+rpkms_for_igv <- rpkms[igv_genes, ] %>% t()
+```
+
+Specify colors for heatmap:
+
+```{r}
+# palette for z-scores
+cor_col <- colorRampPalette( brewer.pal(9, 'YlOrRd') )(100)
+cor_breaks <- seq(-2, 10, length.out = 101)
+# sidebar for heatmap.2
+cell_type_cols <- c(
+  Granule = "#33A02C",
+  Basket = "#FF6600",
+  Astrocyte = "#0033FF",
+  Oligo = "#00CCCC",
+  OPC = "#00FFFF"
+)
+sidebar_row <- rep(cell_type_cols, each = 2)
+sidebar_col <- rep(cell_type_cols, each = 3)
+```
+
+Plot heatmap:
+
+```{r warning=FALSE}
+pdf("../figures/figure_3_s2_heatmap_rat_for_igv.pdf", width = 11, height = 8.5)
+hm <- heatmap.2(
+  rpkms_for_igv,
+  dendrogram = "none", Rowv = FALSE, Colv = FALSE, # no dendrogram, no reordering
+  col = cor_col, breaks = cor_breaks,  # colors for values
+  RowSideColors = sidebar_row, ColSideColors = sidebar_col,  # sidebar
+  scale = "none", trace = "none",
+  key.title = NA, key.ylab = NA,
+  cexRow = 1, cexCol = 1, margins = c(2, 2),
+  labCol = FALSE, labRow = FALSE, symkey = F,
+  keysize = 1, key.par = list(mar = c(4, 2, 1, 1))
+)
+dev.off()
+
+# and display in this file
+eval(hm$call)
+```
+
+
+
+## Length and GC bias
+
+### Get genome features
+
+Load and prepare annotation files. Download fa files from Ensembl.
+
+```{r}
+# define files
+species <- c("mouse", "human")
+annot_files <- tibble(
+  Species = species,
+  GTF = c("../data/ref/mm10_ortho_to_hg38_wg.gtf", 
+          "../data/ref/hg38_ortho_to_mm10_wg.gtf"),
+  Fasta = c("../data/ref/fasta/Mus_musculus.GRCm38.r88_scaffold_chr.fa",
+            "../data/ref/fasta/Homo_sapiens.GRCh38_r88_scaffold_chr.fa")
+)
+
+# load and reduce gtf anootation
+gtfs <- list(
+  mouse = reduceGTF(
+    annot_files %>% filter(Species == "mouse") %>% pull(GTF), 
+    genome = "GRCm38.88", 
+    feature = "wg"
+    ),
+  human = reduceGTF(
+    annot_files %>% filter(Species == "human") %>% pull(GTF),
+    genome = "GRCh38.88", 
+    feature = "wg"
+    )
+)
+```
+
+Load species enriched genes.
+
+```{r message = FALSE}
+cell_types <- c("Granule", "Basket", "Astrocyte", "Oligo", "OPC")
+se_genes <- lapply(cell_types,
+                   function(x) 
+                     read_tsv(
+                       paste("../output/figure_3_main_species_de_mouse_human_", 
+                             tolower(x), ".txt", sep = "")
+                       ) %>%
+                     mutate(Gene_human = convertIDs(Gene)) %>%
+                     mutate(Type = ifelse(log2FoldChange > 0, "mouse", "human")) %>%
+                     mutate(Gene_host = ifelse(log2FoldChange > 0, Gene, Gene_human)) %>%
+                     mutate(Gene_conv = ifelse(log2FoldChange > 0, Gene_human, Gene)) %>%
+                     mutate(Cell_type = x) %>%
+                     select(Gene = Gene_host, Gene_conv, Type, Cell_type)
+                   ) %>%
+  bind_rows() %>%
+  distinct(Gene, .keep_all = TRUE)
+
+# create lookup table for later
+lookup <- se_genes$Cell_type
+names(lookup) <- se_genes$Gene
+```
+
+
+Get genomic summary including GC content and gene length for 4 classes of genes: 
+  * mouse-enriched genes in mouse
+  * human-enriched genes in mouse
+  * mouse-enriched genes in human
+  * human-enriched genes in human
+Also get genomic summary for all mouse and human genes
+  
+```{r}
+# sumamry for species enriched genes
+genomic_sum <- sapply(
+  species,
+  function(host) sapply(
+    c("all", species),
+    function(enr) {
+      # subset gtf
+      host_gtf <- gtfs[[host]]
+      if(enr == "all") {
+        gtf_sub <- host_gtf
+      } else if(enr == host) {
+        gtf_sub <- host_gtf[ 
+          elementMetadata(host_gtf)[, 1] %in% 
+            (se_genes %>% filter(Type == enr) %>% pull(Gene)) 
+          ]
+      } else{
+        gtf_sub <- host_gtf[ 
+          elementMetadata(host_gtf)[, 1] %in% 
+            (se_genes %>% filter(Type == enr) %>% pull(Gene_conv)) 
+          ]
+      }
+      # return length and gc content
+      return( 
+        getGC(gtf_sub, annot_files %>% filter(Species == host) %>% pull(Fasta)) %>%
+          mutate(Host = host, Type = enr, Gene = elementMetadata(gtf_sub)[, 1])
+        )
+      },
+    simplify = FALSE, USE.NAMES = TRUE
+    ),
+  simplify = FALSE, USE.NAMES = TRUE
+  )
+```
+
+
+Reshape data for plotting
+
+```{r message = FALSE}
+genomic_sum_df <- genomic_sum %>%
+  reduce(bind_rows) %>%
+  mutate(Gene = ifelse(Host == "mouse", Gene,
+                       convertIDs(Gene, from = "human", to = "mouse")))
+
+genomic_length <- genomic_sum_df %>%
+  select(-GC) %>%
+  spread(key = Host, value = Length)
+
+genomic_length_se <- genomic_length %>%
+  filter(Type != "all") %>%
+  mutate(Cell_type = ifelse(Type == "mouse", lookup[Gene], lookup[convertIDs(Gene)]))
+```
+
+Match up mouse and human values for gene length and GC content
+
+```{r message = FALSE}
+genomic_length <- genomic_sum_df %>%
+  select(-GC) %>%
+  spread(key = Host, value = Length)
+
+genomic_length_se <- genomic_length %>%
+  filter(Type != "all") %>%
+  mutate(Cell_type = ifelse(Type == "mouse", lookup[Gene], lookup[convertIDs(Gene)]))
+
+genomic_gc <- genomic_sum_df %>%
+  select(-Length) %>%
+  spread(key = Host, value = GC)
+
+genomic_gc_se <- genomic_gc %>%
+  filter(Type != "all") %>%
+  mutate(Cell_type = ifelse(Type == "mouse", lookup[Gene], lookup[convertIDs(Gene)]))
+```
+
+
+Linear regression to find relationship between mouse and human gene length or GC content for all genes
+
+```{r}
+lm_length <- lm(log10(human) ~ log10(mouse), 
+                data = filter(genomic_length, Type == "all")) %>%
+  coefficients()
+lm_gc <- lm(human ~ mouse, data = filter(genomic_gc, Type == "all")) %>%
+  coefficients()
+```
+
+
+
+### Plots
+
+Plot mouse vs human gene length and GC content. Arrange plots, save to file, and display here
+
+```{r message = FALSE, warning = FALSE}
+lims_gc <- c(0.3, 0.75)
+
+g <- arrangeGrob(
+  plotAllByFeature(genomic_length,
+                   slope = lm_length[2],
+                   intercept = lm_length[1]),
+  plotSEByFeature(genomic_length_se %>% filter(Type == "mouse"),
+                  slope = lm_length[2],
+                  intercept = lm_length[1]),
+  plotSEByFeature(genomic_length_se %>% filter(Type == "human"),
+                  slope = lm_length[2],
+                  intercept = lm_length[1]),
+  plotAllByFeature(genomic_gc, lims = lims_gc, log_scale = FALSE,
+                   slope = lm_gc[2],
+                   intercept = lm_gc[1]),
+  plotSEByFeature(genomic_gc_se %>% filter(Type == "mouse"),
+                  lims = lims_gc, log_scale = FALSE,
+                  slope = lm_gc[2],
+                  intercept = lm_gc[1]),
+  plotSEByFeature(genomic_gc_se %>% filter(Type == "human"),
+                  lims = lims_gc, log_scale = FALSE,
+                  slope = lm_gc[2],
+                  intercept = lm_gc[1]),
+  ncol = 3
+  )
+
+ggsaveToPdf( 
+  paste("../figures/figure_3_s2_mouse_vs_human_length_gc.pdf", sep = ""), 
+  plot = g, w = 14, h = 6
+  )
+
+grid.newpage()
+grid.draw(g)
+```
+
+
+
+### GC content vs log2 fold change
+
+Create plots
+
+```{r}
+gc_plots <- lapply(
+  species,
+  function(s) {
+    ps <- lapply(
+      cell_types,
+      function(ct)
+        plotFCAgainstGC(ct, genomic_sum_df %>% filter(Type == "all", Host == s))
+      )
+    names(ps) <- cell_types
+    return(ps)
+  }
+  )
+names(gc_plots) <- species
+```
+
+
+Arrange plots, save to file, and display here
+
+```{r warning = FALSE}
+g <- arrangeGrob(
+  gc_plots[["mouse"]][["Granule"]], gc_plots[["mouse"]][["Basket"]], 
+  gc_plots[["mouse"]][["Astrocyte"]], gc_plots[["mouse"]][["Oligo"]], 
+  gc_plots[["mouse"]][["OPC"]], gc_plots[["human"]][["Granule"]],
+  gc_plots[["human"]][["Basket"]], gc_plots[["human"]][["Astrocyte"]],
+  gc_plots[["human"]][["Oligo"]],gc_plots[["human"]][["OPC"]],
+  ncol = 5
+  )
+
+ggsaveToPdf( 
+  paste("../figures/figure_3_s2_fc_vs_gc.pdf", sep = ""), 
+  plot = g, w = 14, h = 6
+  )
+
+grid.newpage()
+grid.draw(g)
+```
+

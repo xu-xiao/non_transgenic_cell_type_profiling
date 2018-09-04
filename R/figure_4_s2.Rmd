@@ -1,0 +1,331 @@
+---
+title: "R code for Figure 4 - figure supplement 2 - heatmaps of comparative analysis"
+author: "Xiao Xu (xxu@rockefeller.edu)"
+date: "June 2018"
+output: 
+  html_document:
+    toc: yes
+  html_notebook:
+    toc: yes
+---
+
+This is an [R Markdown](http://rmarkdown.rstudio.com) Notebook. This notebook contains R code for figures and analyses related to Figure 4 - figure supplement 2 in the manuscript:
+
+Xu X, Stoyanova EI, Lemiesz A, Xing J, Mash DC, Heintz N (2018). Species and Cell-Type Properties of Classically Defined Human and Rodent Neurons and Glia.
+
+Specifically, this workflow will generate the heatmaps accompanying IGV tracks.
+
+Load libraries and functions:
+
+```{r warning = FALSE, message = FALSE}
+# source custom functions
+source("functions.R")
+
+# libraries for heatmaps and colors
+library(RColorBrewer)
+library(gplots)
+
+# library for manipulating data
+library(data.table)
+
+# work in the tidyverse
+library(tidyverse)
+```
+
+
+
+## Heatmap to accompany IGV tracks
+
+Import rpkms for mouse and human from figure 3
+
+```{r}
+rpkms_mouse <- read_rds("../data_clean/figure_3_main_rpkms_mouse.RDS")
+rpkms_human <- read_rds("../data_clean/figure_3_main_rpkms_human.RDS")
+
+rpkms_mouse_granule <- rpkms_mouse[, grepl("granule", colnames(rpkms_mouse))]
+rpkms_human_granule <- rpkms_human[, grepl("granule", colnames(rpkms_human))]
+```
+
+Import mean rpkm coverage from ATAC tracks over promoters
+
+```{r message = FALSE}
+atac <- read_tsv("../data/atac_prom_rpkm_mean.txt") %>%
+  select(Gene, contains("granule")) %>%
+  rename(Human = Human_granule, Mouse = Mouse_granule) %>%
+  column_to_rownames("Gene") %>%
+  as.matrix()
+```
+
+
+Genes to visualize
+
+```{r}
+igv_genes <- c("Gapdh", "Etv1", 
+               "Clvs2", "Vwc2",
+               "Cnksr3", "Ece1")
+igv_genes_2 <- c("Pde1a", "Pde1c")
+
+rpkms_for_igv_mouse <- rpkms_mouse_granule[igv_genes, ] %>% t()
+rpkms_for_igv_human <- rpkms_human_granule[igv_genes, ] %>% t()
+rpkms_for_igv_mouse_2 <- rpkms_mouse_granule[igv_genes_2, ] %>% t()
+rpkms_for_igv_human_2 <- rpkms_human_granule[igv_genes_2, ] %>% t()
+atac_for_igv <- atac[igv_genes, ] %>% t()
+atac_for_igv_2 <- atac[igv_genes_2, ] %>% t()
+```
+
+
+Specify colors for heatmap
+
+```{r}
+# palette for rpkms
+cor_col <- colorRampPalette( brewer.pal(9, 'YlOrRd') )(100)
+cor_breaks <- seq(-2, 10, length.out = 101)
+cor_breaks_atac <- seq(-2, 5, length.out = 101)
+
+sidebar_col <- rep(c("black", "grey70", "grey30"), each = 2)
+sidebar_col_2 <- c("grey70", "grey30")
+sidebar_row_m <- rep("blue", 3)
+sidebar_row_h <- rep("red", 2)
+sidebar_row_atac <- c("red", "blue")
+```
+
+
+Function for heatmap plotting
+
+```{r}
+plotExpHeatmap <- function(mat, cor_col, cor_breaks, sidebar_row, 
+                           sidebar_col, outfile) {
+  pdf(outfile, width = 11, height = 8.5)
+  hm <- heatmap.2(
+    mat,
+    dendrogram = "none", Rowv = FALSE, Colv = FALSE, # no dendrogram, no reordering
+    col = cor_col, breaks = cor_breaks,  # colors for values
+    RowSideColors = sidebar_row, ColSideColors = sidebar_col,  # sidebar
+    scale = "none", trace = "none",
+    key.title = NA, key.ylab = NA,
+    cexRow = 1, cexCol = 1, margins = c(2, 2),
+    labCol = FALSE, labRow = FALSE, symkey = F,
+    keysize = 1, key.par = list(mar = c(4, 2, 1, 1))
+  )
+  dev.off()
+  
+  # and display in this file
+  eval(hm$call)
+}
+```
+
+
+Plot heatmap mouse
+
+```{r warning=FALSE}
+plotExpHeatmap(rpkms_for_igv_mouse, cor_col, cor_breaks, 
+               sidebar_row_m, sidebar_col, 
+               "../figures/figure_4_s2_heatmap_for_igv_mouse.pdf")
+```
+
+
+Plot heatmap human
+
+```{r warning=FALSE}
+plotExpHeatmap(rpkms_for_igv_human, cor_col, cor_breaks, 
+               sidebar_row_h, sidebar_col, 
+               "../figures/figure_4_s2_heatmap_for_igv_human.pdf")
+```
+
+Plot heatmap for mouse and human ATAC
+```{r warning=FALSE}
+plotExpHeatmap(atac_for_igv, cor_col, cor_breaks_atac, 
+               sidebar_row_atac, sidebar_col, 
+               "../figures/figure_4_s2_heatmap_for_igv_atac.pdf")
+```
+
+Plot heatmap mouse for pde1a and pde1c
+
+```{r warning=FALSE}
+plotExpHeatmap(rpkms_for_igv_mouse_2, cor_col, cor_breaks, 
+               sidebar_row_m, sidebar_col_2, 
+               "../figures/figure_4_s2_heatmap_for_igv_pde_mouse.pdf")
+```
+
+
+
+Plot heatmap human for pde1a and pde1c
+
+```{r warning=FALSE}
+plotExpHeatmap(rpkms_for_igv_human_2, cor_col, cor_breaks, 
+               sidebar_row_h, sidebar_col_2, 
+               "../figures/figure_4_s2_heatmap_for_igv_pde_human.pdf")
+```
+
+
+Plot heatmap for mouse and human ATAC for pde1a and pde1c
+```{r warning=FALSE}
+plotExpHeatmap(atac_for_igv_2, cor_col, cor_breaks_atac, 
+               sidebar_row_atac, sidebar_col_2, 
+               "../figures/figure_4_s2_heatmap_for_igv_pde_atac.pdf")
+```
+
+
+### GATA family genes
+
+Genes to visualize
+
+```{r}
+igv_genes <- c("Trps1", "Gata1", "Gata2", "Gata3", "Gata4", "Gata5", "Gata6")
+
+rpkms_for_igv_mouse <- rpkms_mouse[igv_genes, ] %>% t()
+rpkms_for_igv_human <- rpkms_human[igv_genes, ] %>% t()
+```
+
+
+Specify colors for heatmap
+
+```{r}
+# palette for rpkms
+cor_col <- colorRampPalette( brewer.pal(9, 'YlOrRd') )(100)
+cor_breaks <- seq(-2, 7, length.out = 101)
+
+cell_type_cols <- c(
+  Granule = "#33A02C",
+  Basket = "#FF6600",
+  Astrocyte = "#0033FF",
+  Oligo = "#00CCCC",
+  OPC = "#00FFFF"
+)
+
+sidebar_col <- rep("grey50", length(igv_genes))
+sidebar_row_m <- rep(cell_type_cols, c(3, 3, 2, 2, 2))
+sidebar_row_h <- rep(cell_type_cols, each = 2)
+```
+
+
+
+Plot heatmap mouse
+
+```{r warning=FALSE}
+plotExpHeatmap(rpkms_for_igv_mouse, cor_col, cor_breaks, 
+               sidebar_row_m, sidebar_col, 
+               "../figures/figure_4_s2_heatmap_for_igv_gata_mouse.pdf")
+```
+
+Plot heatmap human
+
+```{r warning=FALSE}
+plotExpHeatmap(rpkms_for_igv_human, cor_col, cor_breaks, 
+               sidebar_row_h, sidebar_col, 
+               "../figures/figure_4_s2_heatmap_for_igv_gata_human.pdf")
+```
+
+
+
+For Figure 4, get some numbers to quantify expression and ATAC coverage for Jkamp and Rtn1
+
+```{r}
+genes <- c("Jkamp", "Rtn1")
+
+# mouse
+rpkms_mouse[genes, grepl("granule|basket", colnames(rpkms_mouse))] %>% 
+  t() %>%
+  as.data.frame() %>%
+  mutate(Cell_type = rep(c("Granule", "Basket"), each = 3)) %>%
+  mutate(Species = "Mouse") %>%
+  rbind(
+    rpkms_human[genes, grepl("granule|basket", colnames(rpkms_human))] %>% 
+      t() %>%
+      as.data.frame() %>%
+      mutate(Cell_type = rep(c("Granule", "Basket"), each = 2)) %>%
+      mutate(Species = "Human")
+  ) %>%
+  gather(key = "Gene", value = "Exp", -c("Cell_type", "Species")) %>%
+  group_by(Cell_type, Gene, Species) %>%
+  summarise(Mean = mean(Exp)) %>%
+  spread(key = Species, value = Mean)
+
+
+atac[genes, ]
+```
+
+
+
+## SNP analysis
+
+Download SNP data from NHGRI-EBI SNP catalog (https://www.ebi.ac.uk/gwas/docs/file-downloads, Downloaded August 16, 2018) and process for intersecting with peaks.
+
+Import snps. Clean up column names.
+
+```{r message = FALSE, warning = FALSE}
+nhgri <- read_tsv("../data/gwas_catalog_v1.0.2-associations_e93_r2018-08-14.tsv")
+colnames(nhgri) <- make.names( tolower( colnames(nhgri) ), unique = TRUE )
+```
+
+Filter for SNPs with dbGAP IDs and that have chromosome information. Select distinct entries by ID, study, and disease
+
+```{r}
+nhgri_clean <- nhgri %>%
+  mutate(dbGAP = ifelse(grepl("^rs", snps, perl = TRUE),
+                        TRUE, FALSE)) %>%
+  filter(dbGAP) %>%
+  drop_na(chr_id, chr_pos) %>%
+  distinct(snps, pubmedid, disease.trait, .keep_all = TRUE) %>%
+  select(-dbGAP)
+```
+
+Identify SNPs that are associated with a trait in two or more studies.
+
+```{r}
+multiple <- nhgri_clean %>%
+  mutate(snp_disease = paste(snps, disease.trait, sep = "_")) %>%
+  group_by(snp_disease) %>%
+  filter(n() > 1) %>%
+  pull(snps)
+```
+
+Output file for intersecting.
+```{r}
+write_tsv(nhgri_clean %>%
+            select(snps, disease.trait, chr_id, chr_pos) %>%
+            distinct(snps, .keep_all = TRUE),
+          "../output/snps_nhgri.txt")
+```
+
+
+
+Read in overlapped files, annotate, and output. How many distinct SNPs and traits are there?
+
+```{r}
+lapply(
+  c("all", "da"),
+  function(x)
+    lapply(
+      c("granule", "basket"),
+      function(ct) {
+        filename <- paste("../data/snps_human_", ct, "_", x, ".txt", sep = "")
+        peaks <- fread(filename, select = c(1:2, 4, 6:8),
+                       col.names = c("snp_chr", "snp_pos", "snp",
+                                     "peak_chr", "peak_start", "peak_end")) %>%
+          as.tibble()
+        peaks_annot <- peaks %>%
+          left_join(nhgri_clean %>%
+                      select(snp = snps, disease.trait, pubmedid, reported.gene.s., 
+                             mapped_gene, strongest.snp.risk.allele, context, 
+                             risk.allele.frequency, p.value, study.accession), 
+                    by = "snp") %>%
+          mutate(Multiple = ifelse(snp %in% multiple, TRUE, FALSE)) %>%
+          arrange(desc(Multiple))
+        outfile <- paste("../output/figure_4_s2_snps_human", ct, x, "annot.txt", sep = "_")
+        write_tsv(peaks_annot, outfile)
+        return(
+          tibble(
+            n_SNPs = peaks_annot %>% distinct(snp) %>% nrow,
+            n_traits = peaks_annot %>% distinct(disease.trait) %>% nrow
+          )
+        )
+      }
+    )
+)
+```
+
+
+
+
+

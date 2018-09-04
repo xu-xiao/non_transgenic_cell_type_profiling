@@ -1,0 +1,134 @@
+---
+title: "R code for Figure 4 - Comparative epigenetic and conservation analysis"
+author: "Xiao Xu (xxu@rockefeller.edu)"
+date: "June 2018"
+output: 
+  html_document:
+    toc: yes
+  html_notebook:
+    toc: yes
+---
+
+This is an [R Markdown](http://rmarkdown.rstudio.com) Notebook. This notebook contains R code for figures and analyses related to Figure 4 in the manuscript:
+
+Xu X, Stoyanova EI, Lemiesz A, Xing J, Mash DC, Heintz N (2018). Species and Cell-Type Properties of Classically Defined Human and Rodent Neurons and Glia.
+
+Specifically, this workflow will generate the figures related mouse human comparative analysis of promoter coverage by ATAC-seq and conservation of ATAC-seq defined peaks for Figure 4.
+
+Load libraries and functions:
+
+```{r warning = FALSE, message = FALSE}
+# source custom functions
+source("functions.R")
+
+# library for data manipulation
+library(plyr)
+
+# work in the tidyverse
+library(tidyverse)
+```
+
+
+## Conservation analysis
+
+### Plot scores
+
+Load scores
+
+```{r message = FALSE}
+scores <- read_tsv("../data/conservation_scores.txt") %>%
+  mutate(Group = paste(Location, Category, sep = "_")) %>%
+  mutate(Cell_type = factor(Cell_type, levels = c("Granule", "Basket")))
+```
+
+
+Boxplot
+
+```{r}
+ggplot(data = scores, aes(x = Group, y = Score)) +
+  geom_boxplot(aes(color = Category, fill = Location)) +
+  scale_fill_manual(values = c("white", "grey80")) +
+  scale_color_manual(values = c("grey50", "magenta")) +
+  stat_summary(fun.y = median, geom = "text", size = 4, 
+               vjust = -0.5, aes( label=round(..y.., digits=2)) ) +
+  facet_grid(Species ~ Cell_type) +
+  theme_bw() + 
+  theme(axis.text.x = element_blank(), axis.ticks.x = element_blank())
+
+# save figure
+ggsaveToPdf("../figures/figure_4_main_cons_se_vs_hk_boxplot.pdf", w = 8, h = 4)
+```
+
+Can also look at distribution with cdf plot
+
+```{r}
+# run previous code to get mouse and human scores
+ggdata <- scores %>%
+  mutate(Category = factor(Category, levels = c("SE", "HK"))) %>%
+  ddply(.(Group), transform, ecd=ecdf(Score)(Score))
+
+ggplot(ggdata, aes(x = Score)) + 
+  stat_ecdf(aes(linetype = Category, color = Location), alpha = 0.8, size = 0.5) +
+  facet_grid(Species ~ Cell_type) +
+  scale_x_continuous(limits = c(-0, 1)) +
+  scale_color_manual(values = c("grey50", "magenta")) +
+  theme_bw()
+```
+
+
+### Summarize scores
+
+Summarize mean, median, and SD of conservation scores by category:
+
+```{r}
+summary_stats <- scores %>%
+  group_by(Cell_type, Species, Location, Category) %>%
+  summarize(Mean = mean(Score), 
+            Median = median(Score), 
+            SD = sd(Score))
+
+summary_stats
+```
+
+What is the median difference between species-enriched and housekeeping conservation scores for gene bodies and promoters?
+
+```{r}
+summary_stats %>%
+  group_by(Location, Species, Category) %>%
+  summarise(Median = median(Median)) %>%
+  spread(Category, Median) %>%
+  mutate(Difference = HK - SE)
+```
+
+
+T-test to determine whether peaks associated with housekeeping (HK) genes are more conserved than peaks associated with species-enriched (SE) genes.
+
+```{r}
+getConsScoreByCategory <- function(scores, ct, species, loc, cat) {
+  filtered <- scores %>%
+    filter(Cell_type == ct, Species == species, Location == loc, Category == cat) %>%
+    select(Score) %>%
+    pull()
+}
+
+sapply(c("Granule", "Basket"), 
+       function(x) sapply(c("human", "mouse"), 
+                          function(y) sapply(c("Promoter", "Gene_body"), 
+                                             function(z) t.test(
+                                               getConsScoreByCategory(
+                                                 scores, x, y, z, "HK"
+                                                 ), 
+                                               getConsScoreByCategory(
+                                                 scores, x, y, z, "SE"
+                                                 ),
+                                               alternative = "greater"
+                                               )$p.value
+                                             ))) %>%
+  as.data.frame() %>%
+  mutate(Species = c(rep("Human", 2), rep("Mouse", 2))) %>%
+  mutate(Location = rep(c("Promoter", "Gene_body"), 2)) %>%
+  select(Species, Location, Granule, Basket) %>%
+  mutate(Granule = format.pval(Granule), Basket = format.pval(Basket))
+```
+
+

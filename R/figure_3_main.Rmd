@@ -1,0 +1,361 @@
+---
+title: "R code for Figure 3 - heatmaps of comparative analysis"
+author: "Xiao Xu (xxu@rockefeller.edu)"
+date: "June 2018"
+output: 
+  html_document:
+    toc: yes
+  html_notebook:
+    toc: yes
+---
+
+This is an [R Markdown](http://rmarkdown.rstudio.com) Notebook. This notebook contains R code for figures and analyses related to Figure 3 in the manuscript:
+
+Xu X, Stoyanova EI, Lemiesz A, Xing J, Mash DC, Heintz N (2018). Species and Cell-Type Properties of Classically Defined Human and Rodent Neurons and Glia.
+
+Specifically, this workflow will generate the heatmaps comparing gene expression across species for Figure 3.
+
+Load libraries and functions:
+
+```{r warning = FALSE, message = FALSE}
+# source custom functions
+source("functions.R")
+
+# libraries for gene expression analysis
+library(DESeq2)
+
+# libraries for heatmaps and colors
+library(RColorBrewer)
+library(gplots)
+library(pheatmap)
+
+# for GO analysis
+library(org.Hs.eg.db)
+library(clusterProfiler)
+
+# work in the tidyverse
+library(tidyverse)
+```
+
+
+## Clustering analysis
+
+### Import counts
+
+Read in counts and define metadata
+
+```{r message = FALSE}
+counts <- read_tsv("../data/merge_mm_hg_rn_ortho_all_wg_counts.txt")
+
+meta <- tibble(
+  Sample = colnames(counts)[-1],
+  Species = c(rep("mouse", 15), rep("human", 10), rep("rat", 12)),
+  Cell_type = gsub("^.*_", "", colnames(counts)[-1])
+)
+```
+
+
+### Normalize counts
+
+Use rlog transformation in deseq2 to normalize counts:
+
+```{r}
+# run deseq2
+dds <- DESeqDataSetFromMatrix(counts %>% column_to_rownames("Gene"), 
+                              meta %>% column_to_rownames("Sample"),
+                              design = ~ Species + Cell_type)
+dds <- DESeq(dds)
+
+# generate normalized counts
+rld <- rlogTransformation(dds, blind = TRUE)
+rld_table <- assay(rld)
+
+# save normalized counts
+write_rds(rld, "../data_clean/figure_3_main_mm_hg_rn_ortho_norm_rld.RDS")
+```
+
+
+### Hierarchical clustering
+
+Specifiy colors for heatmap:
+
+```{r}
+# specify color palette
+hmcol <- colorRampPalette( rev(brewer.pal(9, "RdYlBu")) )(100)
+
+# extend color range to avoid out of bound values showing up as white
+hmcol2 <- c(
+  hmcol, 
+  rep(tail(hmcol, n = 1), 40)
+  )
+
+# colors for samples
+ann_colors <- list(
+  Species = c(human = "olivedrab2", mouse = "pink", rat = "orchid3"),
+  Cell_type = c(granule = "green", purkinje = "red", basket = "orange",
+                astrocyte = "blue", oligo = "cyan", opc = "skyblue")
+)
+```
+
+
+Perform hierarchical clustering with the 250 most variable genes
+
+```{r}
+# get 250 most variable genes across samples
+top_var_genes <- head(order(rowVars(rld_table), decreasing = TRUE), 250)
+mat <- rld_table[top_var_genes, ]
+
+# center by subracting row mean
+mat <- mat - rowMeans(mat)
+```
+
+
+Plot heatmap.
+
+```{r}
+# save to pdf
+pdf("../figures/figure_3_main_heatmap_species_cell_type_var250.pdf", width = 11, height = 8.5)
+hm <- pheatmap(
+  mat,
+  show_rownames = FALSE, show_colnames = FALSE,
+  breaks = seq(-5, 9, length = 141),
+  col = hmcol2,
+  annotation_col = meta %>% 
+    column_to_rownames("Sample") %>% 
+    as.data.frame(), 
+  annotation_colors = ann_colors
+)
+dev.off()
+
+# and display in this file
+hm
+```
+
+
+
+
+
+## Comparative analysis
+
+### General species differences
+
+Since rat annotation is less complete, perform comparative analysis of gene expression on mouse and human samples only. Load counts from mouse and human samples using mouse-human orthologous annotation.
+
+```{r message = FALSE}
+counts <- read_tsv("../data/merge_mm_hg_ortho_mouse_human_wg_counts.txt")
+
+meta <- tibble(
+  Sample = colnames(counts)[-1],
+  Species = c(rep("mouse", 12), rep("human", 10)),
+  Cell_type = gsub("^.*_", "", colnames(counts)[-1])
+)
+```
+
+
+Get genes that are differentially expressed across all cell types between mouse and human.
+
+```{r warning = FALSE, message = FALSE}
+dds <- DESeqDataSetFromMatrix(counts %>% column_to_rownames("Gene"), 
+                              meta %>% column_to_rownames("Sample"),
+                              design = ~ Species)
+dds <- DESeq(dds)
+
+p <- 0.0001
+
+de_general <- results(dds, contrast = c("Species", "mouse", "human"), 
+              lfcThreshold = 1, altHypothesis = "greaterAbs") %>%
+  as.data.frame() %>%
+  rownames_to_column("Gene") %>%
+  filter(padj < p) %>%
+  pull("Gene")
+```
+
+Calculate fpkms (rpkms) for filtering.
+
+```{r message = FALSE, warning = FALSE}
+# read in gene lengths for mouse and human
+lengths_mouse <- read_tsv("../data/ref/ensembl_ortho_mh_mouse_gene_longest.txt", 
+                          col_names =  c("Gene", "Length") )
+# human ids need to be converted to mouse equivalent
+lengths_human <- read_tsv("../data/ref/ensembl_ortho_mh_human_gene_longest.txt",
+                          col_names =  c("Gene", "Length") ) %>%
+  mutate(Gene = convertIDs(Gene, from = "human", to = "mouse"))
+
+# calculate rpkms for mouse and human samples separately
+rpkms_mouse <- getNormCounts(counts %>% 
+                               select(Gene, 
+                                      meta %>% 
+                                        filter(Species == "mouse") %>% 
+                                        pull(Sample)),
+                             lengths_mouse)
+rpkms_human <- getNormCounts(counts %>% 
+                               select(Gene, 
+                                      meta %>% 
+                                        filter(Species == "human") %>% 
+                                        pull(Sample)),
+                             lengths_human)
+# save rpkm calculations for later
+write_rds(rpkms_mouse, "../data_clean/figure_3_main_rpkms_mouse.RDS")
+write_rds(rpkms_human, "../data_clean/figure_3_main_rpkms_human.RDS")
+
+# calculate rpkm average for each cell type
+colnames(rpkms_mouse) <- make.unique( meta %>% filter(Species == "mouse") %>% pull(Cell_type) )
+rpkms_mean_mouse <- aggregateByCondition(rpkms_mouse %>% as.data.frame(),
+                                         unique(meta$Cell_type),
+                                         rowMeans)
+
+colnames(rpkms_human) <- make.unique( meta %>% filter(Species == "human") %>% pull(Cell_type) )
+rpkms_mean_human <- aggregateByCondition(rpkms_human %>% as.data.frame(),
+                                         unique(meta$Cell_type),
+                                         rowMeans)
+
+# join rpkm table
+rpkms_mean <- rpkms_mean_mouse %>%
+  rownames_to_column("Gene") %>%
+  left_join(rpkms_mean_human %>% rownames_to_column("Gene"),
+            by = "Gene", suffix = c("_mouse", "_human"))
+
+# for each cell type keep highest mean rpkm value for filtering
+getMaxRPKM <- function(rpkms, cell_type) {
+  rpkms_sub <- rpkms %>%
+    select(starts_with(cell_type))
+  
+  max_vector <- pmax(rpkms_sub[, 1], rpkms_sub[, 2])
+  return(max_vector)
+}
+
+rpkms_for_filter <- sapply(unique(meta$Cell_type),
+                           getMaxRPKM,
+                           rpkms = rpkms_mean) %>%
+  as.data.frame() %>%
+  mutate(Gene = rpkms_mean$Gene)
+```
+
+
+
+```{r message = FALSE, warning = FALSE}
+cts <- unique( meta$Cell_type )
+
+for( i in 1:length(cts) ) {
+  
+  ####   for each cell type, find genes that are mouse or human enriched    ####
+  
+  cell_type <- cts[i]
+  # run deseq2 to get species differentially expressed genes
+  de_table <- getCellTypeSpeciesDE(counts, meta, cell_type)
+  # filter DE genes by expression and exclude general species DE genes
+  sig_table <- outputSpeciesDE(de_table, rpkms_for_filter, de_general, cell_type)
+  
+  ########################
+  
+  #####   plot heatmap   #####
+  
+  mat <- getMatForHeatmap(cell_type, sig_table)
+  
+  saveToPdf(paste("../figures/figure_3_main_heatmap_de_", 
+            cell_type, ".pdf", sep = ""))
+  hm <- heatmap.2(
+    mat,
+    col = colorRampPalette(rev(brewer.pal(9, 'RdYlBu')))(100), 
+    breaks = seq(-3, 3, length.out = 101),
+    dendrogram = "none", margins = c(6, 6),
+    labCol = FALSE, labRow = FALSE,
+    Rowv = FALSE, Colv = FALSE,
+    scale = "none", trace = "none"
+  )
+  dev.off()
+  
+  # and display in this file
+  eval(hm$call)
+  
+  ########################
+  
+  
+  #####    perform GO analysis and write results to disk   #####
+  runGOForSpecies(sig_table, cell_type)
+}
+```
+
+
+
+## Heatmap to accompany IGV tracks
+
+Genes to visualize
+
+```{r}
+igv_genes <- c("Fat2", "Vwc2", "Cnksr3", 
+               "March11", "Lmcd1", "Mpp7",
+               "Slc1a3", "Rgcc", "Mybpc1",
+               "Mog", "Gldn", "Kcnk13",
+               "Pdgfra", "Scn9a", "Lpcat2")
+rpkms_for_igv_mouse <- rpkms_mouse[igv_genes, ] %>% t()
+rpkms_for_igv_human <- rpkms_human[igv_genes, ] %>% t()
+```
+
+
+Specify colors for heatmap
+
+```{r}
+# palette for z-scores
+cor_col <- colorRampPalette( brewer.pal(9, 'YlOrRd') )(100)
+cor_breaks <- seq(-2, 10, length.out = 101)
+
+# sidebar for heatmap.2
+cell_type_cols <- c(
+  Granule = "#33A02C",
+  Basket = "#FF6600",
+  Astrocyte = "#0033FF",
+  Oligo = "#00CCCC",
+  OPC = "#00FFFF"
+)
+sidebar_row <- rep(cell_type_cols, c(3, 3, 2, 2, 2))
+sidebar_col <- rep(cell_type_cols, each = 3)
+```
+
+
+Plot heatmap mouse
+
+```{r warning=FALSE}
+pdf("../figures/figure_3_main_heatmap_for_igv_mouse.pdf", width = 11, height = 8.5)
+hm <- heatmap.2(
+  rpkms_for_igv_mouse,
+  dendrogram = "none", Rowv = FALSE, Colv = FALSE, # no dendrogram, no reordering
+  col = cor_col, breaks = cor_breaks,  # colors for values
+  RowSideColors = sidebar_row, ColSideColors = sidebar_col,  # sidebar
+  scale = "none", trace = "none",
+  key.title = NA, key.ylab = NA,
+  cexRow = 1, cexCol = 1, margins = c(2, 2),
+  labCol = FALSE, labRow = FALSE, symkey = F,
+  keysize = 1, key.par = list(mar = c(4, 2, 1, 1))
+)
+dev.off()
+
+# and display in this file
+eval(hm$call)
+```
+
+
+
+Plot heatmap human
+
+```{r warning=FALSE}
+sidebar_row <- rep(cell_type_cols, each = 2)
+pdf("../figures/figure_3_main_heatmap_for_igv_human.pdf", width = 11, height = 8.5)
+hm <- heatmap.2(
+  rpkms_for_igv_human,
+  dendrogram = "none", Rowv = FALSE, Colv = FALSE, # no dendrogram, no reordering
+  col = cor_col, breaks = cor_breaks,  # colors for values
+  RowSideColors = sidebar_row, ColSideColors = sidebar_col,  # sidebar
+  scale = "none", trace = "none",
+  key.title = NA, key.ylab = NA,
+  cexRow = 1, cexCol = 1, margins = c(2, 2),
+  labCol = FALSE, labRow = FALSE, symkey = F,
+  keysize = 1, key.par = list(mar = c(4, 2, 1, 1))
+)
+dev.off()
+
+# and display in this file
+eval(hm$call)
+```
+
+

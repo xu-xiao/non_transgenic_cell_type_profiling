@@ -1,0 +1,410 @@
+---
+title: "R code for Figure 3 - figure supplement 1 - comparative analysis of defined cell types across species"
+author: "Xiao Xu (xxu@rockefeller.edu)"
+date: "June 2018"
+output: 
+  html_document:
+    toc: yes
+  html_notebook:
+    toc: yes
+---
+
+This is an [R Markdown](http://rmarkdown.rstudio.com) Notebook. This notebook contains R code for figures and analyses related to Figure 3 - figure supplement 1 in the manuscript:
+
+Xu X, Stoyanova EI, Lemiesz A, Xing J, Mash DC, Heintz N (2018). Species and Cell-Type Properties of Classically Defined Human and Rodent Neurons and Glia.
+
+Specifically, this workflow will generate the figures related to clustering, PCA, and analysis of SI ranks of mouse, human, and rat samples for Figure 3 - figure supplement 1.
+
+Load libraries and functions:
+
+```{r warning = FALSE, message=FALSE}
+# source custom functions
+source("functions.R")
+
+# libraries for gene expression analysis
+library(DESeq2)
+
+# libraries for heatmaps and plotting
+library(RColorBrewer)
+library(gplots)
+library(pheatmap)
+library(gridExtra)
+
+# for data manipulation
+library(plyr)
+
+# work in the tidyverse
+library(tidyverse)
+library(reshape2)
+```
+
+
+
+## Clustering analysis
+
+### Import counts
+
+Read in normalized counts from Figure 3 and redefine metadata.
+
+```{r}
+rld <- read_rds("../data_clean/figure_3_main_mm_hg_rn_ortho_norm_rld.RDS")
+rld_table <- assay(rld)
+
+meta <- tibble(
+  Sample = colnames(rld_table),
+  Species = c(rep("mouse", 15), rep("human", 10), rep("rat", 12)),
+  Cell_type = gsub("^.*_", "", colnames(rld_table))
+)
+
+```
+
+
+### Hierarchical clustering
+
+Specifiy colors for heatmap:
+
+```{r}
+# specify color palette
+hmcol <- colorRampPalette( rev(brewer.pal(9, "RdYlBu")) )(100)
+
+# extend color range to avoid out of bound values showing up as white
+hmcol2 <- c(
+  hmcol, 
+  rep(tail(hmcol, n = 1), 40)
+  )
+
+# colors for samples
+cell_cols <- c(granule = "green", purkinje = "red", basket = "orange",
+                astrocyte = "blue", oligo = "cyan", opc = "skyblue")
+
+ann_colors <- list(
+  Species = c(human = "olivedrab2", mouse = "pink", rat = "orchid3"),
+  Cell_type = cell_cols
+)
+```
+
+
+Clustering based on all genes:
+```{r}
+distsRL <- dist( t(rld_table) )
+hc <- hclust(distsRL)
+
+# center by subracting row mean
+mat <- rld_table - rowMeans(rld_table)
+```
+
+
+Plot heatmap.
+
+```{r}
+# save to pdf
+pdf("../figures/figure_3_s1_heatmap_spcies_cell_type_var_all.pdf", 
+    width = 11, height = 8.5)
+hm <- pheatmap(
+  mat,
+  cluster_cols = hc,
+  show_rownames = FALSE, show_colnames = FALSE,
+  breaks = seq(-5, 9, length = 141),
+  col = hmcol2,
+  annotation_col = meta %>% 
+    column_to_rownames("Sample") %>% 
+    as.data.frame(), 
+  annotation_colors = ann_colors
+)
+dev.off()
+
+# and display in this file
+hm
+```
+
+
+
+
+## principal components analysis
+
+Calculate principal components:
+```{r}
+pca <- calcPCA(rld, 
+               intgroup = c('Species', 'Cell_type'), 
+               ntop = 250, npcs = 8)
+# reorder cell types
+pca$Cell_type <- factor(pca$Cell_type,
+                        levels = c("granule", "purkinje", "basket",
+                                   "astrocyte", "oligo", "opc"))
+```
+
+
+Examine contribution of different principal components.
+
+```{r}
+plotPCImportance(pca)
+ggsaveToPdf("../figures/figure_3_s1_pca_importance.pdf")
+
+plotPCCumImportance(pca)
+ggsaveToPdf("../figures/figure_3_s1_pca_cum_importance.pdf")
+
+# get some summary statistics
+pvar <- attributes(pca)$percentVar[1:8]
+
+sum(pvar) # percentage contribution to variability of PC1-8
+sum(pvar[c(1, 3)])  # percentage contribtuion of PC1 and 3 - cell type
+sum(pvar[c(2, 6, 8)])  # percentage contribution of PC 2, 6, and 8 - species
+```
+
+
+
+Plot PC1 and 2 together:
+```{r}
+ggplot(pca, mapping = aes(x = PC1, y = PC2)) + 
+  geom_point(aes(shape = Species, color = Cell_type), 
+             size = 8, alpha = 0.8) +
+  scale_color_manual(values = cell_cols) +
+  theme_bw()
+ggsaveToPdf("../figures/figure_3_s1_pca_pc1_vs_pc2.pdf", w = 6, h = 4)
+```
+
+Plot PCs 3-9 against PC1
+
+```{r}
+plotPCsCustom <- function(pca, pc) {
+  ggplot(pca, mapping = aes_string(x = "PC1", y = pc)) + 
+    geom_point(aes(shape = Species, color = Cell_type), 
+               size = 2, alpha = 0.8) +
+    scale_color_manual(values = cell_cols) +
+    theme_bw() +
+    theme(legend.position = "none")
+}
+
+all_plots <- lapply(paste("PC", seq(from = 3, to = 8, by = 1), sep = ""),
+                    plotPCsCustom, pca = pca)
+
+# arrange plots in grid and save to pdf
+
+saveToPdf("../figures/figure_3_s1_pca_pc1_vs_pcs3-8.pdf", w = 9, h = 6)
+pca_grid <- grid.arrange(all_plots[[1]], all_plots[[2]], all_plots[[3]], all_plots[[4]],
+                         all_plots[[5]], all_plots[[6]], ncol = 3)
+dev.off()
+
+# display plot here
+grid.arrange(pca_grid)
+```
+
+
+# Correlation analysis
+
+## Calculate correlations
+
+Create table of pairwise correlations and do a bunch of data wrangling to get it into the right format
+
+``` {r}
+pairwise_cor <- cor(rld_table) %>%                     # get pairwise correlation
+  as.data.frame() %>%
+  rownames_to_column("Sample") %>%
+  left_join(meta, by = "Sample") %>%                   # merge with metadata
+  melt(id = c("Sample", "Species", "Cell_type")) %>%   # melt data
+  filter(Species == "mouse") %>%                       # use mouse as reference species
+  left_join(meta, by = c("variable" = "Sample"), suffix = c("_from", "_to")) %>%   # get to species meta
+  # only keep correlation if same species, different cell types
+  # or different species, same cell type
+  filter((Species_from == Species_to & Cell_type_from != Cell_type_to) |
+           (Species_from != Species_to & Cell_type_from == Cell_type_to)) %>%
+  # define type of comparison
+  mutate(Comp = ifelse(Species_to == "mouse", "mouse", Cell_type_to)) %>%
+  # relevel for plotting
+  mutate(Comp = factor(Comp, levels = c("granule", "purkinje", "basket",
+              "astrocyte", "oligo", "opc", "mouse")))
+```
+
+
+## Plot
+```{r}
+# colors for plotting
+species_col<-c(human="olivedrab2", mouse="pink2", rat="orchid3")
+# dot plot
+ggplot(pairwise_cor, aes(x = Comp, y = value)) +
+  geom_point(aes(color = Species_to), size = 6, alpha = 0.9) +
+  scale_color_manual(values = species_col) +
+  theme_bw()
+ggsaveToPdf("../figures/figure_3_s1_cor_speices_cell_type.pdf")
+```
+
+
+# Specificity index comparison
+
+Compute specificity index for each species on orthologous genes only.
+
+Read in counts and define metadata. Calculate with and without Purkinje samples. Remove mouse and rat Purkinje samples so that all species have the same group of cell types.
+
+```{r message = FALSE}
+counts <- read_tsv("../data/merge_mm_hg_rn_ortho_all_wg_counts.txt")
+counts_sub <- counts %>%
+  select(-contains("purkinje"))
+
+meta <- tibble(
+  Sample = colnames(counts)[-1],
+  Species = c(rep("mouse", 15), rep("human", 10), rep("rat", 12)),
+  Cell_type = gsub("^.*_", "", colnames(counts)[-1])
+)
+meta_sub <- meta %>%
+  filter(Cell_type != "purkinje")
+```
+
+
+Normalize counts by length using FPKM (RPKM) calculation.
+
+```{r message = FALSE, warning = FALSE}
+# define length files for each species
+length_files <- tibble(
+  Species = c("mouse", "rat", "human"),
+  Lengths = c("../data/ref/ensembl_ortho_mouse_gene_longest.txt",
+              "../data/ref/ensembl_ortho_rat_gene_longest_to_mouse.txt",
+              "../data/ref/ensembl_ortho_human_gene_longest_to_mouse.txt")
+)
+
+rpkms <- lapply( 
+  c("mouse", "rat"), 
+  function(species) getRPKMBySpecies(species, length_files, counts, meta) )
+names(rpkms) <- c("mouse", "rat")
+
+rpkms_sub <- lapply( 
+  unique(meta$Species), 
+  function(species) getRPKMBySpecies(species, length_files, counts_sub, meta_sub) 
+  )
+names(rpkms_sub) <- unique(meta$Species)
+```
+
+
+Calculate SI for each species on server using parallel processing. 
+
+```{r eval = FALSE}
+writeSI <- function(species, rpkm_list, meta, 
+                    filebase = "../output/figure_3_s1_si_ortho_") {
+   set.seed(1)
+   si_table <- siWithReps(rpkm_list[[species]] %>% as.data.frame(), 
+                          meta %>% filter(Species == species) %>% pull(Cell_type), 
+                          bottom = 0, reps = TRUE, iterations = 1000,
+                          parallel = TRUE, cores = 32)
+   write_tsv(si_table %>% 
+               as.data.frame() %>%
+               rownames_to_column("Gene"),
+             paste(filebase, species, ".txt", sep = ""))
+   return(NULL)
+}
+
+# with purkinje
+lapply(c("mouse", "rat"), writeSI, rpkm_list = rpkms, 
+       meta = meta, filebase = "../output/figure_3_s1_si_ortho_")
+
+# without purkinje
+lapply(unique(meta$Species), writeSI, rpkm_list = rpkms_sub,
+       meta = meta_sub, filebase = "../output/figure_3_s1_si_ortho_wo_purk_")
+```
+
+
+
+Import SI rankings
+
+```{r message = FALSE}
+si_wo_purk <- list(
+  mouse = read_tsv("../output/figure_3_s1_si_ortho_wo_purk_mouse.txt"),
+  rat = read_tsv("../output/figure_3_s1_si_ortho_wo_purk_rat.txt"),
+  human = read_tsv("../output/figure_3_s1_si_ortho_wo_purk_human.txt") 
+)
+si_w_purk <- list(
+  mouse = read_tsv("../output/figure_3_s1_si_ortho_mouse.txt"),
+  rat = read_tsv("../output/figure_3_s1_si_ortho_rat.txt")
+)
+```
+
+
+Get ranks of mouse top SI genes in other species and plot heatmap
+
+```{r}
+plotAndReturnRanks <- function(cell_type, si_all, species, hm_cols, breaks) {
+  # for top 100 mouse genes, get si ranks in rat and human
+  ranks <- sapply(species,
+                  function(x) getRank(siGetTopN(si_all[["mouse"]], cell_type, 100), 
+                                      si_all[[x]], cell_type))
+  ranks_log <- log(ranks, base = 10)
+  
+  #####   plot heatmap   #####
+  
+  saveToPdf( paste("../figures/figure_3_s1_heatmap_si_", cell_type, ".pdf", sep = "") )
+  hm <- heatmap.2(
+    ranks_log,
+    col = hm_cols, breaks = breaks,
+    dendrogram = "none", margins = c(6, 6),
+    labCol = FALSE, labRow = FALSE,
+    Rowv = FALSE, Colv = FALSE,
+    scale = "none",trace = "none"
+  )
+  dev.off()
+  
+  # and display in this file
+  eval(hm$call)
+  
+  # return melted ranks
+  return( melt(ranks) %>% 
+            select(-Var1, Species = Var2, Rank = value) %>% 
+            mutate(Cell_type = cell_type) )
+}
+
+# set colors for heatmaps
+breaks <- seq(from = 1, to = log(12000, base = 10), length.out = 101)
+hm_cols <- colorRampPalette( brewer.pal(9, "RdYlBu") )(100)
+
+mranks <- lapply(c("granule", "basket", "astrocyte", "oligo", "opc"),
+                 plotAndReturnRanks,
+                 si_all = si_wo_purk,
+                 species = c("mouse", "rat", "human"),
+                 hm_cols = hm_cols,
+                 breaks = breaks)
+
+mranks[["purkinje"]] <- plotAndReturnRanks("purkinje", si_w_purk, 
+                                           c("mouse", "rat"), hm_cols, breaks)
+```
+
+
+
+## Boxplot of rankings
+
+```{r warning = FALSE}
+# set order for plot
+order_conds <- c("granule_mouse", "granule_rat", "granule_human",
+                 "purkinje_mouse", "purkinje_rat",
+                 "basket_mouse", "basket_rat", "basket_human",
+                 "astrocyte_mouse", "astrocyte_rat", "astrocyte_human",
+                 "oligo_mouse", "oligo_rat", "oligo_human",
+                 "opc_mouse", "opc_rat", "opc_human")
+
+# format data frame for plotting
+ranks_all <- mranks %>% 
+  bind_rows %>%
+  mutate(Condition = paste(Cell_type, Species, sep = "_")) %>%
+  mutate(Condition = factor(Condition, order_conds))
+
+# get median rank values for plotting
+rank_meds <- ranks_all %>%
+  group_by(Condition) %>%
+  summarise(med = median(Rank))
+
+# set colors
+cell_cols <- c(granule = "green", purkinje = "red", basket = "orange",
+              astrocyte = "blue", oligo = "cyan", opc = "skyblue")
+
+# plot
+ggplot(ranks_all, aes(x = Condition, y = Rank)) + 
+  geom_boxplot(aes(color = Cell_type, fill = Species)) +
+  scale_y_log10() +
+  scale_color_manual(values = cell_cols) +
+  scale_fill_manual(values = c("white", "grey90", "grey70")) +
+  geom_text(data = rank_meds, aes(x = Condition, y = med, label = med), 
+            size = 5, vjust = -0.5) +
+  theme_bw() +
+  theme(axis.title.x = element_blank(),
+        axis.text.x = element_blank(),
+        axis.ticks.x = element_blank())
+
+# save plot
+ggsaveToPdf("../figures/figure_3_s1_box_si.pdf")
+```

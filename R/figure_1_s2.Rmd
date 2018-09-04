@@ -1,0 +1,319 @@
+---
+title: "R code for Figure 1 - figure supplement 2 - Comparison with single nuclei RNA-seq"
+author: "Xiao Xu (xxu@rockefeller.edu)"
+date: "June 2018"
+output: 
+  html_document:
+    toc: yes
+  html_notebook:
+    toc: yes
+---
+
+This is an [R Markdown](http://rmarkdown.rstudio.com) Notebook. This notebook contains R code for figures and analyses related to Figure 1 - figure supplement 2 in the manuscript:
+
+Xu X, Stoyanova EI, Lemiesz A, Xing J, Mash DC, Heintz N (2018). Species and Cell-Type Properties of Classically Defined Human and Rodent Neurons and Glia.
+
+Specifically, this workflow will generate a heatmap to accompany IGV tracks and figures relating to sequencing depth and comparison with single nuclei sequencing.
+
+Load libraries and functions:
+
+```{r warning = FALSE, message = FALSE}
+# source custom functions
+source("functions.R")
+
+# libraries for heatmaps and colors
+library(RColorBrewer)
+library(gplots)
+
+# libraries for data manipulation
+library(reshape2)
+
+# work in the tidyverse
+library(tidyverse)
+```
+
+
+## Heatmap to accompany IGV tracks
+
+Import counts and create metadata
+
+```{r message = FALSE}
+# read in table of counts
+counts <- read_tsv("../data/mouse_gfp_antibody_wg_counts.txt") %>%
+  select(Gene, contains("olig2"))
+meta <- tibble(
+  Sample = colnames(counts)[-1],
+  Type = c("All", rep("Low", 2), rep("High", 2))
+)
+```
+
+
+Normalize counts by length using FPKM (RPKM) calculation:
+
+```{r message = FALSE, warning = FALSE}
+# read in gene lengths
+lengths <- read_tsv("../data/ref/mm10_refseq_wg_longest.txt", 
+                    col_names = c("Gene", "Length"))
+
+# calculate rpkms
+rpkms <- getNormCounts(counts, lengths, type = "RPKM")
+```
+
+
+Genes to visualize
+
+```{r}
+igv_genes <- c("Aldh1l1", "Olig2", "Pdgfra", "Cspg4", "Mag", "Mog")
+rpkms_for_igv <- rpkms[igv_genes, ] %>% t()
+```
+
+
+Specify colors for heatmap:
+
+```{r}
+# palette
+cor_col <- colorRampPalette( brewer.pal(9, 'YlOrRd') )(100)
+cor_breaks <- seq(-2, 6, length.out = 101)
+# sidebar for heatmap.2
+cell_type_cols <- c(
+  All = "black",
+  Low = "#00CCCC",
+  High = "#00FFFF"
+)
+sidebar_row <- rep(cell_type_cols, c(1, 2, 2))
+```
+
+
+Plot heatmap:
+
+```{r warning=FALSE}
+pdf("../figures/figure_1_s2_heatmap_for_igv_oligo.pdf", width = 11, height = 8.5)
+hm <- heatmap.2(
+  rpkms_for_igv,
+  dendrogram = "none", Rowv = FALSE, Colv = FALSE, # no dendrogram, no reordering
+  col = cor_col, breaks = cor_breaks,  # colors for values
+  RowSideColors = sidebar_row, # sidebar
+  scale = "none", trace = "none",
+  key.title = NA, key.ylab = NA,
+  cexRow = 1, cexCol = 1, margins = c(2, 2),
+  labCol = FALSE, labRow = FALSE, symkey = F,
+  keysize = 1, key.par = list(mar = c(4, 2, 1, 1))
+)
+dev.off()
+
+# and display in this file
+eval(hm$call)
+```
+
+
+## Single nuclei analysis
+
+### Import counts and normalize
+
+Import mouse glia counts and define metadata
+
+```{r message = FALSE}
+counts_sorted <- read_tsv("../data/mouse_gfp_antibody_wg_counts.txt") %>%
+  select(Gene, contains("sept4"), contains("eaat1"), contains("olig2_"))
+
+# create lookup table for cell types
+lookup <- c(
+  "sept4_gfp" = "b_glia",
+  "eaat1" = "astro",
+  "olig2_low" = "oligo",
+  "olig2_high" = "opc"
+)
+
+meta_sorted <- tibble(
+  Sample = colnames(counts_sorted)[-1]
+) %>%
+  separate(Sample, into = c("ID", "Gating"), sep = "_", remove = FALSE, extra = "merge") %>%
+  mutate(Cell_type = lookup[Gating]) %>%
+  mutate(Type = ifelse(grepl("gfp", Gating), "GFP", "AB")) %>%
+  select(-Gating)
+```
+
+
+Import SN-Seq glia counts and define metadata. Raw sequence files were downloaded from GEO (GSE84371) for 17 astrocyte, 8 oligodendrocyte, and 7 OPC single nuclei mouse RNA-seq (sNuc-Seq) datasets from:
+
+Habib N, Li Y, Heidenreich M, Swiech L et al. Div-Seq: Single-nucleus RNA-Seq reveals dynamics of rare adult newborn neurons. Science 2016 Aug 26;353(6302):925-8. PMID: 27471252
+
+To directly compare these datasets to our bulk nuclear profiles for the same cell types, downloaded sequences were aligned to the mm10 genome and raw counts against mouse Refseq whole gene annotation were generated as described in the methods section of our manuscript.
+
+```{r message = FALSE}
+counts_sn <- read_tsv("../data/sn_counts.txt")
+
+meta_sn <- tibble(
+  Sample = colnames(counts_sn)[-1]
+) %>%
+  separate(Sample, into = c("Cell_type", "ID"), sep = "_", remove = FALSE) %>%
+  mutate(Cell_type = gsub("asc", "astro", Cell_type)) %>%
+  select(Sample, ID, Cell_type) %>%
+  mutate(Type = "SN")
+```
+
+
+Merge metadata and counts and TPM normalize
+
+```{r message = FALSE, warning = FALSE}
+# read in gene lengths
+lengths <- read_tsv("../data/ref/mm10_refseq_wg_longest.txt", 
+                    col_names = c("Gene", "Length"))
+# tpm normalize
+tpms_sorted <- getNormCounts(counts_sorted, lengths, type = "TPM_DV")
+tpms_sn <- getNormCounts(counts_sn, lengths, type = "TPM_DV")
+
+# merge
+meta <- meta_sorted %>%
+  bind_rows(meta_sn) %>%
+  mutate(Type_ct = paste(Type, Cell_type, sep = "_"))
+tpms <- tpms_sn %>%
+  merge(tpms_sorted, by = "row.names") %>%
+  rename(Gene = Row.names)
+```
+
+
+### ECDF plot
+
+```{r warning = FALSE}
+# format data for plotting
+tpms_melt <- tpms %>% 
+  melt() %>%
+  rename(Sample = variable) %>%
+  left_join(meta, by = "Sample")
+
+# define colors
+set1 <- brewer.pal(9, "Set1")
+lookup <- c(
+  AB_astro = set1[2], 
+  AB_oligo = set1[4], 
+  AB_opc = set1[9], 
+  GFP_b_glia = set1[3], 
+  SN_astro = set1[1], 
+  SN_oligo = set1[5], 
+  SN_opc = set1[8]
+)
+line_cols <- meta %>%
+  mutate(Colors = lookup[Type_ct]) %>%
+  pull(Colors)
+names(line_cols) <- meta$Sample
+
+# plot
+ggplot(tpms_melt, aes(value)) +
+  stat_ecdf(aes(color = Sample), alpha = 0.5, size = 0.5) +
+  geom_vline(xintercept=1.1, linetype = "dotted") + 
+  scale_x_continuous(limits = c(-0.5, 10)) +
+  scale_color_manual(values = line_cols) +
+  ylab("Cumulative Proportion") +
+  xlab("Log2(TPM)") +
+  theme_bw() + 
+  theme(legend.position = c(0.8,0.3), 
+        legend.text = element_text(size=4),
+        legend.key = element_rect(size = 2),
+        legend.key.size = unit(0.5, 'lines'))
+ggsaveToPdf("../figures/figure_1_s2_ecdf.pdf")
+```
+
+
+### Genes detected
+
+Import subsampled counts
+
+```{r message = FALSE}
+counts_sub <- read_tsv("../data/sub_counts.txt")
+meta_sub <- tibble(
+  Sample = colnames(counts_sub)[-1]
+) %>%
+  separate(Sample, into = c("ID", "Cell_type", "Reads"), remove = FALSE) %>%
+  mutate(Type = "AB") %>%
+  mutate(Reads = as.numeric(Reads) * 1000) %>%
+  select(Sample, ID, Cell_type, Type, Reads)
+```
+
+Calculate number of expressed genes for each sample
+
+```{r}
+# TPM normalize subsample counts
+tpms_sub <- getNormCounts(counts_sub, lengths, type = "TPM_DV")
+# calculate number of expressed genes
+n_exp <- apply(tpms_sub, 2, function(x) length(x[x > 1.1]))
+# merge with metadata
+exp_sub <- meta_sub %>%
+  mutate(Expressed = n_exp)
+```
+
+Import nubmer of reads for SN-seq datasets
+
+```{r message = FALSE}
+sn_mapped <- read_tsv("../data/sn_number_of_reads.txt")
+n_exp <- apply(tpms_sn, 2, function(x) length(x[x > 1.1]))
+exp_sn <- meta_sn %>%
+  left_join(sn_mapped, by = "Sample") %>%
+  mutate(Expressed = n_exp)
+```
+
+Plot
+
+```{r}
+exp_all <- exp_sub %>%
+  bind_rows(exp_sn)
+
+ggplot(exp_all, aes(x = Reads, y = Expressed)) +
+  geom_point(aes(color = Type), alpha = 0.5) +
+  scale_color_manual(values = c("red", "black")) +
+  theme_bw()
+ggsaveToPdf("../figures/figure_1_s2_genes_by_reads.pdf")
+```
+
+
+
+### Heatmap of gene expression
+
+Read in marker genes and subset tpms for plotting
+
+```{r message = FALSE, warning = FALSE}
+# read in marker genes
+marker_genes <- read_tsv("../data/sn_marker_genes.txt")
+# only look at antibody-sorted and sn nuclei
+meta_ab_sn <- meta %>%
+  filter(Type != "GFP") %>%
+  arrange(desc(Type))
+
+# subset tpms by marker genes
+tpms_markers <- tpms %>%
+  select(Gene, meta_ab_sn$Sample) %>%
+  filter(Gene %in% marker_genes$Gene)
+
+# reorder
+tpms_ab_max <- apply(tpms_markers[, !grepl("_S|Gene", colnames(tpms_markers))], 1, max)
+tpms_ordered <- tpms_markers %>%
+  mutate(Max = tpms_ab_max) %>%
+  left_join(marker_genes, by = "Gene") %>%
+  arrange(Cell_type, desc(Type), desc(Max)) %>%
+  select(-c("Max", "Cell_type", "Type")) %>%
+  column_to_rownames("Gene") %>%
+  as.matrix()
+```
+
+Plot heatmap
+
+```{r}
+# set heatmap colors
+hm_cols <- colorRampPalette( brewer.pal(9, "Oranges") )(100)
+hm_breaks <- seq(0, 12, length.out = 101)
+
+# save to pdf
+pdf("../figures/figure_1_s2_exp_heatmap.pdf", width = 11, height = 8.5)
+hm <- heatmap.2(
+  tpms_ordered, 
+  dendrogram = "none", trace = "none",
+  Rowv = FALSE, Colv = FALSE,
+  col = hm_cols, breaks = hm_breaks
+)
+dev.off()
+
+# and display in this file
+eval(hm$call)
+```
+
+

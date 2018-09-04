@@ -1,0 +1,193 @@
+---
+title: "R code for Figure 5 - Correlation of gene expression in three cell types across sixteen individuals"
+author: "Xiao Xu (xxu@rockefeller.edu)"
+date: "June 2018"
+output: 
+  html_document:
+    toc: yes
+  html_notebook:
+    toc: yes
+---
+
+This is an [R Markdown](http://rmarkdown.rstudio.com) Notebook. This notebook contains R code for figures and analyses related to Figure 5 in the manuscript:
+
+Xu X, Stoyanova EI, Lemiesz A, Xing J, Mash DC, Heintz N (2018). Species and Cell-Type Properties of Classically Defined Human and Rodent Neurons and Glia.
+
+Specifically, this workflow will generate the heatmap accompanying IGV expression tracks and boxplot of Pearson's correlations for Figure 5.
+
+Load libraries and functions:
+
+```{r warning = FALSE, message = FALSE}
+# source custom functions
+source("functions.R")
+
+# libraries for gene expression analysis
+library(DESeq2)
+
+# libraries for heatmaps and colors
+library(RColorBrewer)
+library(gplots)
+
+# work in the tidyverse
+library(tidyverse)
+library(reshape2)
+```
+
+
+## Heatmap to accompany IGV tracks
+
+Load counts and define metadata for human samples
+
+```{r message = FALSE}
+counts <- read_tsv("../data/human_all_wg_counts.txt")
+
+meta <- tibble(
+  Sample = colnames(counts)[-1]
+) %>%
+  separate(Sample, into = c("ID", "Donor", "Cell_type"), sep = "_", remove = FALSE) %>%
+  mutate(Donor_ct = paste(Donor, Cell_type, sep = "_"))
+```
+
+
+
+Calculate fpkms (rpkms) for visualization.
+
+```{r message = FALSE, warning = FALSE}
+# read in gene lengths
+lengths <- read_tsv("../data/ref/hg38_refseq_wg_longest.txt", col_names = c("Gene", "Length"))
+# calculate rpkms
+rpkms <- getNormCounts(counts, lengths)
+# reorder samples for visualization
+donors <- c("xk", "wc", "wl", "vm", "sg", "lt", "ke",
+            "tm", "wo", "wi", "pk", "or", "zh", "ko", "kq", "ai")
+sample_order <- tibble(
+  Cell_type = c(rep("basket", 16), rep("granule", 16), rep("glia", 14)),
+  Donor = c(rep(donors, 2), donors[!(donors %in% c("wc", "wo"))])
+) %>%
+  mutate(Donor_ct = paste(Donor, Cell_type, sep = "_")) %>%
+  select(Donor_ct) %>%
+  left_join(meta, by = "Donor_ct")
+rpkms_ordered <- rpkms[, sample_order$Sample]
+```
+
+Genes to visualize
+
+```{r}
+genes_gender <- c("XIST", "KDM5D")
+genes_basket <- c("PVALB", "SORCS3", "KIT", "MARCH11")
+gene_basket_granule <- "NRXN3"
+genes_granule <- c("FAT2", "RBFOX3", "GABRA6", "RELN", "ETV1")
+genes_glia <- c("SLC1A3", "ALDH1L1", "MOG", "PCDH9", "S100B", "OLIG2")
+igv_genes <- c(genes_gender, genes_basket, gene_basket_granule, genes_granule, genes_glia)
+
+rpkms_for_igv <- rpkms_ordered[igv_genes, ] %>% t()
+```
+
+Specify colors for heatmap:
+
+```{r}
+# palette for rpkms
+cor_col <- colorRampPalette( brewer.pal(9, 'YlOrRd') )(100)
+cor_breaks <- seq(-2, 11, length.out = 101)
+
+# sidebar for heatmap.2
+cell_type_cols <- c(
+  Granule = "#33A02C",
+  Basket = "#FF6600",
+  Glia = "blue"
+)
+sidebar_row <- rep(cell_type_cols, c(16, 16, 14))
+sidebar_col <- c(
+  rep( "grey50", length( genes_gender ) ),
+  rep( cell_type_cols["Basket"], length( genes_basket ) ),
+  "brown",
+  rep( cell_type_cols["Granule"], length( genes_granule ) ),
+  rep( cell_type_cols["Glia"], length( genes_glia ) )
+)
+```
+
+Plot heatmap:
+
+```{r warning=FALSE}
+pdf("../figures/figure_5_main_heatmap_human_for_igv.pdf", width = 11, height = 8.5)
+hm <- heatmap.2(
+  rpkms_for_igv,
+  dendrogram = "none", Rowv = FALSE, Colv = FALSE, # no dendrogram, no reordering
+  col = cor_col, breaks = cor_breaks,  # colors for values
+  RowSideColors = sidebar_row, ColSideColors = sidebar_col,  # sidebar
+  scale = "none", trace = "none",
+  key.title = NA, key.ylab = NA,
+  cexRow = 1, cexCol = 1, margins = c(2, 2),
+  labCol = FALSE, labRow = FALSE, symkey = F,
+  keysize = 1, key.par = list(mar = c(4, 2, 1, 1))
+)
+dev.off()
+
+# and display in this file
+eval(hm$call)
+```
+
+
+
+## Boxplot of correlations
+
+For correlation calculations, normalize counts using deseq2's rlog transformation
+
+```{r message = FALSE}
+dds <- DESeqDataSetFromMatrix(counts %>% column_to_rownames("Gene"),
+                              meta %>% column_to_rownames("Sample"),
+                              design = ~ Cell_type)
+dds <- DESeq(dds)
+rld <- rlogTransformation(dds)
+rld_table <- assay(rld) %>%
+  as.data.frame() %>%
+  rownames_to_column("Gene")
+# save normalized counts
+write_rds(rld, "../data_clean/figure_5_main_human_all_norm_rld.RDS")
+```
+
+Get pairwise correlation and reshape for plotting
+
+```{r}
+# calculate pairwise correlation
+pairwise_cor <- cor(rld_table %>% column_to_rownames("Gene"))
+# make correlation matrix non-redundant
+pairwise_cor[lower.tri(pairwise_cor)] <- NA
+
+# lookup table for standardizing names for comparisons
+lookup <- c("granule_basket" = "basket_granule",
+            "glia_basket" = "basket_glia",
+            "glia_granule" = "granule_glia")
+
+# reshape for plotting
+pairwise_long <- melt(pairwise_cor) %>%
+  na.omit() %>%                 ## remove NA values
+  filter(value != 1) %>%        ## remove self-correlations
+  separate(Var1, into = c("ID", "Donor", "Cell_type_x"), sep = "_") %>%
+  select(-ID, -Donor) %>%
+  separate(Var2, into = c("ID", "Donor", "Cell_type_y"), sep = "_") %>%
+  select(-ID, -Donor) %>%
+  # within cell type comparisons
+  mutate(Comparison = ifelse(Cell_type_x == Cell_type_y,
+                             Cell_type_x, 
+                             paste(Cell_type_x, Cell_type_y, sep = "_"))) %>%
+  # across cell type comparisons get standardized name
+  mutate(Comparison = ifelse(Comparison %in% names(lookup),
+                             lookup[Comparison], Comparison)) %>%
+  # set order for plotting
+  mutate(Comparison = factor(Comparison, 
+                             levels = c("basket", "granule", "glia", "basket_granule",
+                                        "basket_glia", "granule_glia")))
+```
+
+
+Plot and save figure
+
+```{r}
+ggplot(pairwise_long, aes(x = Comparison, y = value)) +
+  geom_boxplot() +
+  theme_bw() +
+  theme(axis.title.x = element_blank())
+
+ggsaveToPdf("../figures/figure_5_main_boxplot_cor.pdf", w = 10, h = 4)
+```

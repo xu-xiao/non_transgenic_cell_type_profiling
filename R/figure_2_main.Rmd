@@ -1,0 +1,304 @@
+---
+title: "R code for Figure 2 - MA plots of differentially expressed genes and heatmap of top SI genes"
+author: "Xiao Xu (xxu@rockefeller.edu)"
+date: "June 2018"
+output: 
+  html_document:
+    toc: yes
+  html_notebook:
+    toc: yes
+---
+
+This is an [R Markdown](http://rmarkdown.rstudio.com) Notebook. This notebook contains R code for figures and analyses related to Figure 2 in the manuscript:
+
+Xu X, Stoyanova EI, Lemiesz A, Xing J, Mash DC, Heintz N (2018). Species and Cell-Type Properties of Classically Defined Human and Rodent Neurons and Glia.
+
+Specifically, this workflow will generate the MA plots and heatmap of top SI gene expression for Figure 2.
+
+Load libraries and functions:
+
+```{r warning = FALSE, message = FALSE}
+# source custom functions
+source("functions.R")
+
+# libraries for gene expression analysis
+library(DESeq2)
+
+# libraries for heatmaps and colors
+library(RColorBrewer)
+library(gplots)
+
+# data manipulation
+library(plyr)
+
+# work in the tidyverse
+library(tidyverse)
+library(ggrepel)
+```
+
+
+
+## Import counts
+
+Read in table of counts generated from featureCounts:
+
+```{r message = FALSE}
+# read in table of counts
+counts <- read_tsv("../data/rat_all_wg_counts.txt")
+```
+
+Create metadata for samples:
+
+```{r}
+cell_types <- c("Unsorted", "Granule", "Purkinje", "Basket", "Astrocyte", "Oligo", "OPC")
+meta <- tibble(
+  Sample = colnames(counts)[-1],
+  Cell_type = rep(
+    cell_types,
+    each = 2
+    )
+  )
+```
+
+Read in table of marker genes for each cell type:
+```{r message = FALSE}
+markers <- read_tsv("../data/cell_type_markers.txt")
+```
+
+
+
+## MA plots
+
+```{r message = FALSE, warning = FALSE}
+# for each cell type, perform differential expression compared
+# to unsorted, print number of significant genes
+# and generate MA plot
+getDEStatsAndPlot <- function(counts, meta, ct, p, bm) {
+  de <- getDECustom(counts, meta, "Unsorted", ct)
+  printDE(de, p, bm, ct)
+  ma <- plotMACustom(de, alpha = p, 
+                     markers = markers %>% 
+                       filter(Cell_type == ct) %>% 
+                       select(-Cell_type)) +
+    ggtitle(ct)
+  ggsave(paste("figure_2_main_ma_", tolower(ct), ".pdf", sep = ""),
+         ma, device = "pdf", path = "../figures/",
+         width = 11, height = 8.5, units = "in")
+  ma
+}
+
+# p-value cutoff for stats and plotting
+# basemean cutoff for stats
+p <- 10e-5
+bm <- 50
+ 
+# apply above function to all cell types except for unsorted
+lapply(
+  cell_types[-1],
+  function(x) getDEStatsAndPlot(counts, meta, x, p, bm)
+)
+```
+  
+
+
+## Human
+
+### Import counts
+
+Read in table of counts generated from featureCounts:
+
+```{r message = FALSE}
+# read in table of counts
+counts <- read_tsv("../data/human_xk_pk_wg_counts.txt")
+```
+
+Create metadata for samples:
+
+```{r}
+meta <- tibble(
+  Sample = colnames(counts)[-1],
+  Cell_type = rep(
+    c("Granule", "Basket", "Astrocyte", "Oligo", "OPC"),
+    each = 2
+    ),
+  Individual = rep(c("XK", "PK"), 5)
+  )
+```
+
+
+
+### Normalize counts
+
+Use rlog transformation in deseq2 to normalize counts:
+```{r message=FALSE}
+# create dds object
+dds <- DESeqDataSetFromMatrix(counts %>% column_to_rownames("Gene"), 
+                              meta %>% column_to_rownames("Sample"), 
+                              design =~ Cell_type)
+dds <- DESeq(dds)
+
+# get normalized counts using rlog transformation
+rld <- rlogTransformation(dds, blind = TRUE)
+rld_table <- assay(rld)
+# save normalized counts
+write_rds(rld, "../data_clean/figure_2_main_human_norm_rld.RDS")
+```
+
+
+
+### Plot heatmap
+
+Perform hierarchical clustering with the 250 most variable genes:
+
+```{r}
+top_var_genes <- head(order(rowVars(rld_table), decreasing = TRUE), 250)
+mat <- rld_table[top_var_genes, ]
+hc <- hclust( dist( t(mat) ) )
+```
+
+
+Calculate pearson correlation coeffcients across all samples:
+
+```{r}
+pairwise <- cor(rld_table)
+colnames(pairwise) <- rownames(pairwise) <- colData(dds)$condition
+```
+
+
+Specify colors for heatmap:
+
+```{r}
+# specify color palette and breaks
+cor_col <- colorRampPalette( brewer.pal(9, "YlOrRd") )(100)
+cor_breaks <- seq(0.9, 1, length.out = 101)
+
+# sidebar for heatmap.2
+sidebar <- c(rep("green", 2), rep("orange", 2), rep("blue", 2), 
+             rep("cyan", 2), rep("skyblue", 2))
+```
+
+
+Plot heatmap:
+
+```{r}
+# save to pdf
+pdf("../figures/figure_2_main_heatmap_human_cor.pdf", width = 11, height = 8.5)
+hm <- heatmap.2(
+  pairwise,
+  Rowv = as.dendrogram(hc),
+  symm = TRUE, revC = TRUE,
+  scale = "none", trace = "none",
+  ColSideColors = sidebar,
+  notecol = "black", notecex = 0.25,
+  col = cor_col, breaks = cor_breaks,
+  key.title = NA, key.ylab = NA,
+  cexRow = 1, cexCol = 1, margins = c(6, 6),
+  labCol = FALSE, labRow = FALSE,
+  keysize = 1, key.par = list(mar = c(4, 2, 1, 1))
+)
+dev.off()
+
+# and display in this file
+eval(hm$call)
+```
+
+
+
+
+
+
+  
+# Plot SI heatmap
+
+Normalize counts by length using FPKM (RPKM) calculation:
+
+```{r}
+# read in gene lengths
+lengths <- read_tsv("../data/ref/hg38_refseq_wg_longest.txt", 
+                    col_names = c("Gene", "Length"))
+
+# calculate rpkms
+rpkms <- getNormCounts(counts, lengths, type = "RPKM")
+```
+
+
+Calculate SI on server using parallel processing. With parallel off, takes around 1.5 hours to run for 1,000 iterations:
+```{r eval = FALSE}
+set.seed(1)
+si_table <- siWithReps(rpkms %>% as.data.frame(), 
+                       meta$Cell_type, 
+                       bottom = 0, reps = TRUE, iterations = 1000,
+                       parallel = TRUE, cores = 32)
+write_tsv(si_table %>% 
+            as.data.frame() %>%
+            rownames_to_column("Gene"), 
+          "../output/si_human.txt")
+```
+
+
+
+Read in specificity index data, identify the top 20 genes for each cell type, and get rpkms for each gene across all conditions:
+
+```{r message = FALSE, warning = FALSE}
+# read in specificity index table
+si_table <- read_tsv("../output/si_human.txt") %>% 
+  column_to_rownames("Gene")
+
+# get top 20 si genes for each cell type
+si_top20 <- as.vector( apply(si_table, 2, sortedIndex, table=si_table, top=20) )
+# get rpkms for top si genes
+rpkms_si <- expFromGeneList(rpkms, si_top20)
+# convert rpkms to z scores for heatmap plotting
+mat <- as.matrix( apply(rpkms_si, 1, getZScores) )
+```
+
+
+Specify heatmap palette and sidebar colors
+
+```{r}
+# palette for z-scores
+cor_col <- rev( colorRampPalette( brewer.pal(9, 'RdBu') )(100) )
+cor_breaks <- seq(-2.5, 2.5, length.out = 101)
+# sidebar for heatmap.2
+cell_type_cols <- c(
+  Granule = "#33A02C",
+  Basket = "#FF6600",
+  Astrocyte = "#0033FF",
+  Oligo = "#00CCCC",
+  OPC = "#00FFFF"
+)
+sidebar_row <- rep(cell_type_cols, each = 2)
+sidebar_col <- rep(cell_type_cols, each = 20)
+```
+
+
+Final heatmap:
+
+```{r warning=FALSE}
+pdf("../figures/figure_2_main_heatmap_human_si.pdf", width = 11, height = 8.5)
+hm <- heatmap.2(
+  mat,
+  dendrogram = "none", Rowv = FALSE, Colv = FALSE, # no dendrogram, no reordering
+  col = cor_col, breaks = cor_breaks,  # colors for values
+  RowSideColors = sidebar_row, ColSideColors = sidebar_col,  # sidebar
+  scale = "none", trace = "none",
+  key.title = NA, key.ylab = NA,
+  cexRow = 1, cexCol = 1, margins = c(2, 2),
+  labCol = FALSE, labRow = FALSE,
+  keysize = 1, key.par = list(mar = c(4, 2, 1, 1))
+)
+dev.off()
+
+# and display in this file
+eval(hm$call)
+```
+
+
+
+
+
+
+
+
+
+

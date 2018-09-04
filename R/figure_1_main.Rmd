@@ -1,0 +1,237 @@
+---
+title: "R code for Figure 1 - Cell-type specific expression profiling in wild-type mice"
+author: "Xiao Xu (xxu@rockefeller.edu)"
+date: "June 2018"
+output: 
+  html_document:
+    toc: yes
+  html_notebook:
+    toc: yes
+---
+
+This is an [R Markdown](http://rmarkdown.rstudio.com) Notebook. This notebook contains R code for figures and analyses related to Figure 1 in the manuscript:
+
+Xu X, Stoyanova EI, Lemiesz A, Xing J, Mash DC, Heintz N (2018). Species and Cell-Type Properties of Classically Defined Human and Rodent Neurons and Glia.
+
+Specifically, this workflow will generate the heatmap representation of IGV tracks and correlation heatmap with hierarchical clustering panel for Figure 1.
+
+Load libraries:
+```{r warning = FALSE, message = FALSE}
+# source custom functions
+source("functions.R")
+
+# library for gene expression analysis
+library(DESeq2)
+
+# libraries for heatmaps and colors
+library(RColorBrewer)
+library(gplots)
+
+# library for data manipulation
+library(plyr)
+
+# work in the tidyverse
+library(tidyverse)
+```
+
+
+## Import counts
+
+Read in table of counts generated from featureCounts:
+
+```{r message = FALSE}
+# read in table of counts
+counts <- read_tsv("../data/mouse_gfp_antibody_wg_counts.txt")
+```
+
+Create metadata for samples:
+
+```{r}
+meta <- tibble(
+  Sample = colnames(counts)[-1],
+  Cell_type = c(rep("Granule", 3), rep("Purkinje", 4), rep("Bglia", 4),
+                rep("Granule", 3), rep("Purkinje", 3), rep("Basket", 3),
+                rep("Astrocyte", 2), "Oligo_all", rep("Oligo", 2), 
+                rep("OPC", 2)),
+  Label = c(rep("GFP", 11), rep("Ant", 16))
+  ) %>%
+  mutate(Condition = paste(Cell_type, Label, sep = "_"))
+```
+
+
+## Heatmap to accompany IGV tracks
+
+Normalize counts by length using FPKM (RPKM) calculation:
+
+```{r message = FALSE, warning = FALSE}
+# read in gene lengths
+lengths <- read_tsv("../data/ref/mm10_refseq_wg_longest.txt", 
+                    col_names = c("Gene", "Length"))
+
+# calculate rpkms
+rpkms <- getNormCounts(counts %>%
+                         select(-contains("gfp"), -contains("low"), -contains("high")), 
+                       lengths, type = "RPKM")
+```
+
+
+Genes to visualize
+
+```{r}
+igv_genes <- c("Rbfox3", "Fat2", "Car8", "Calb1", "Sorcs3", "March11",
+               "Aldh1l1", "Slc1a3", "Olig2", "Mog")
+rpkms_for_igv <- rpkms[igv_genes, ] %>% t()
+```
+
+
+Specify colors for heatmap:
+
+```{r}
+# palette
+cor_col <- colorRampPalette( brewer.pal(9, 'YlOrRd') )(100)
+cor_breaks <- seq(-2, 6, length.out = 101)
+# sidebar for heatmap.2
+cell_type_cols <- c(
+  Granule = "#33A02C",
+  Purkinje = "#E31A1C",
+  Basket = "#FF6600",
+  Astrocyte = "#0033FF",
+  Oligo.all = "cyan"
+)
+sidebar_row <- rep(cell_type_cols, c(3, 3, 3, 2, 1))
+sidebar_col <- rep(cell_type_cols, each = 2)
+```
+
+
+Plot heatmap:
+
+```{r warning=FALSE}
+pdf("../figures/figure_1_main_heatmap_mouse_for_igv.pdf", width = 11, height = 8.5)
+hm <- heatmap.2(
+  rpkms_for_igv,
+  dendrogram = "none", Rowv = FALSE, Colv = FALSE, # no dendrogram, no reordering
+  col = cor_col, breaks = cor_breaks,  # colors for values
+  RowSideColors = sidebar_row, ColSideColors = sidebar_col,  # sidebar
+  scale = "none", trace = "none",
+  key.title = NA, key.ylab = NA,
+  cexRow = 1, cexCol = 1, margins = c(2, 2),
+  labCol = FALSE, labRow = FALSE, symkey = F,
+  keysize = 1, key.par = list(mar = c(4, 2, 1, 1))
+)
+dev.off()
+
+# and display in this file
+eval(hm$call)
+```
+
+
+
+
+## Normalize counts
+
+Use rlog transformation in deseq2 to normalize counts:
+```{r message=FALSE}
+# create dds object
+dds <- DESeqDataSetFromMatrix(counts %>% column_to_rownames("Gene"), 
+                              meta %>% column_to_rownames("Sample"), 
+                              design =~ Condition)
+dds <- DESeq(dds)
+
+# get normalized counts using rlog transformation
+rld <- rlogTransformation(dds, blind = TRUE)
+rld_table <- assay(rld)
+# save normalized counts
+write_rds(rld, "../data_clean/figure_1_main_mouse_gfp_antibody_norm_rld.RDS")
+```
+
+
+## Plot heatmap
+
+Perform hierarchical clustering with the 250 most variable genes:
+
+```{r}
+top_var_genes <- head(order(rowVars(rld_table), decreasing = TRUE), 250)
+mat <- rld_table[top_var_genes, ]
+hc <- hclust( dist( t(mat) ) )
+```
+
+
+Calculate pearson correlation coeffcients across all samples:
+
+```{r}
+pairwise <- cor(rld_table)
+colnames(pairwise) <- rownames(pairwise) <- colData(dds)$condition
+```
+
+
+Specify colors for heatmap:
+
+```{r}
+# specify color palette and breaks
+cor_col <- colorRampPalette( brewer.pal(9, "YlOrRd") )(100)
+cor_breaks <- seq(0.92, 1, length.out = 101)
+
+# sidebar for heatmap.2
+sidebar = c(rep("#B2DF8A", 3), rep("#FB9A99", 4), rep("#0000CC", 4),
+            rep("#33A02C", 3), rep("#E31A1C", 3), rep("#FF6600", 3),
+            rep("#0033FF", 2), "grey30", rep("#00CCCC", 2), rep("#00FFFF", 2))
+```
+
+
+Plot heatmap:
+
+```{r}
+# save to pdf
+pdf("../figures/figure_1_main_heatmap.pdf", width = 11, height = 8.5)
+hm <- heatmap.2(
+  pairwise,
+  Rowv = as.dendrogram(hc),
+  symm = TRUE, revC = TRUE,
+  scale = "none", trace = "none",
+  ColSideColors = sidebar,
+  notecol = "black", notecex = 0.25,
+  col = cor_col, breaks = cor_breaks,
+  key.title = NA, key.ylab = NA,
+  cexRow = 1, cexCol = 1, margins = c(6, 6),
+  labCol = FALSE, labRow = FALSE,
+  keysize = 1, key.par = list(mar = c(4, 2, 1, 1))
+)
+dev.off()
+
+# and display in this file
+eval(hm$call)
+```
+
+
+## Calculate SI
+
+Normalize counts:
+
+```{r message = FALSE, warning = FALSE}
+# calculate rpkms
+rpkms <- getNormCounts(counts %>%
+                         select(-contains("gfp"), -contains("1638")), 
+                       lengths, type = "RPKM")
+```
+
+
+Calculate SI for antibody sorted samples. Do this on server using parallel processing. With parallel off, takes around 1.5 hours to run for 1,000 iterations:
+```{r eval = FALSE}
+set.seed(1)
+si_table <- siWithReps(rpkms %>% as.data.frame(), 
+                       meta %>% 
+                         filter(Label == "Ant", Sample != "1638_olig2") %>% 
+                         pull(Cell_type), 
+                       bottom = 0, reps = TRUE, iterations = 1000,
+                       parallel = TRUE, cores = 32)
+write_tsv(si_table %>% 
+            as.data.frame() %>%
+            rownames_to_column("Gene"), 
+          "../output/si_mouse.txt")
+```
+
+
+
+
+
+

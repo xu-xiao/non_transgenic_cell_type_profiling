@@ -1,0 +1,480 @@
+---
+title: "R code for Figures 7 main and figure supplement 1 - Interindividual variability that is not explained by clinical data"
+author: "Xiao Xu (xxu@rockefeller.edu)"
+date: "July 2018"
+output: 
+  html_document:
+    toc: yes
+  html_notebook:
+    toc: yes
+---
+
+This is an [R Markdown](http://rmarkdown.rstudio.com) Notebook. This notebook contains R code for figures and analyses related to Figures 7 main and figure supplement 1 in the manuscript:
+
+Xu X, Stoyanova EI, Lemiesz A, Xing J, Mash DC, Heintz N (2018). Species and Cell-Type Properties of Classically Defined Human and Rodent Neurons and Glia.
+
+Specifically, this workflow will analyze whether there exists interindividual variability that is not explianed by known clinical factors. It will also generate the MA plot and cnet plot of GO terms.
+
+Load libraries and functions:
+
+```{r warning = FALSE, message = FALSE}
+# source custom functions
+source("functions.R")
+
+# libraries for gene expression analysis
+library(DESeq2)
+
+# libraries for heatmaps and colors
+library(RColorBrewer)
+library(gplots)
+
+# for GO analysis
+library(org.Hs.eg.db)
+library(clusterProfiler)
+
+# work in the tidyverse
+library(tidyverse)
+library(ggrepel)
+library(grid)
+library(gridExtra)
+library(reshape2)
+library(ggbeeswarm)
+```
+
+
+## PCA to identify unknown sources of variability
+
+Load counts and metadata for human samples. Also laod normalized counts from figure 5.
+
+```{r message = FALSE}
+counts <- read_tsv("../data/human_all_wg_counts.txt")
+meta <- read_tsv("../data/human_metadata.txt")
+rld_table <- read_rds("../data_clean/figure_5_main_human_all_norm_rld.RDS") %>%
+  assay() %>%
+  as.data.frame() %>%
+  rownames_to_column("Gene")
+```
+
+Define some functions to calculate PCA and produce plots
+
+```{r}
+plotPCA <- function(pca, x, y, leg = TRUE) {
+  #cell_cols <- c("granule" = "green", "basket" = "orange", "glia" = "blue")
+  p <- ggplot(pca, mapping = aes_string(x, y, label = "Donor")) + 
+    geom_point(aes(color = Gender, size = Age, shape = Race), 
+               alpha = 0.7) +
+    geom_text_repel(size = 12) +
+    scale_color_manual(values = c("orchid2", "royalblue2")) +
+    theme_bw()
+  
+  if(leg) 
+    p <- p + theme(legend.position="none")
+  
+  return(p)
+}
+
+plotPCAScoresAndLoadings <- function(meta, norm_counts, ct) {
+  # subset by cell type
+  meta_sub <- meta %>%
+    filter(Cell_type == ct)
+  norm_counts_sub <- norm_counts %>%
+    select(Gene, meta_sub$Sample)
+  
+  # get PCA scores and loadings
+  pca <- calcPCAScoresAndLoadings(norm_counts_sub)
+  
+  
+    
+  # plot contribution to variance for first 8 principal components
+  plot( plotPCImportance(pca[["scores"]]) )
+  ggsaveToPdf( paste("../figures/figure_7_main_pca_importance_", ct, ".pdf", sep = "") )
+  
+
+  # join scores with metadata
+  pca_annot <- pca[["scores"]] %>%
+    rownames_to_column("Sample") %>%
+    left_join(meta_sub, by = "Sample")
+  
+  # plot loadings along side score for PC1 vs PCs2, 3, or 4
+  # all plots are saving to file but not sure why only 
+  # last plot is showing up in notebook
+  lapply( c("PC4", "PC3", "PC2"),
+          function(x) {
+            g <- arrangeGrob(
+              plotTopNLoadings(pca[["loadings"]], "PC1", x),
+              plotPCA(pca_annot, "PC1", x),
+              ncol = 2
+              )
+            ggsaveToPdf( 
+              paste("../figures/figure_7_main_pca_", ct, "_PC1_vs_", x, ".pdf", sep = ""), 
+              plot = g 
+              )
+            grid.draw(g, recording = FALSE)
+          })
+  
+  # save single plot with legend
+  plotPCA(pca_annot, "PC1", "PC2", leg = FALSE)
+  ggsaveToPdf( paste("../figures/figure_7_main_pca_", ct, 
+                     "_PC1_vs_PC2_with_legend.pdf", sep = "") )
+  
+  # return table with proportion variance for each pc
+  prop_var <- tibble(
+    Cell_type = rep(ct, 8),
+    Name = attributes(pca[["scores"]])$names,
+    Percent_var = attributes(pca[["scores"]])$percentVar
+  )
+  return(prop_var)
+}
+```
+
+
+For each cell type, perform PCA, plot scores and loadings. Return table with proportion variability for each PC.
+
+```{r warning = FALSE}
+plotPCAScoresAndLoadings(meta, rld_table, "granule")
+plotPCAScoresAndLoadings(meta, rld_table, "glia") 
+plotPCAScoresAndLoadings(meta, rld_table, "basket")
+```
+
+
+
+## DE analysis
+
+Perform differential expression analysis to get full list of DE granule cell genes between individuals VM, ZH, and WI compared to the other indivdiuals.
+
+Helper function
+
+```{r}
+getDE <- function(counts, meta, cell_type) {
+  fos_donors <- c("vm", "zh", "wi")
+
+  meta_sub <- meta %>%
+    filter(Cell_type == cell_type) %>%
+    mutate(Group = ifelse(Donor %in% fos_donors,
+                          "Fos", "Not_fos"))
+  counts_sub <- counts %>%
+    select(Gene, meta_sub$Sample)
+  
+  # deseq
+  dds <- DESeqDataSetFromMatrix(counts_sub %>% column_to_rownames("Gene"), 
+                                meta_sub %>% column_to_rownames("Sample"),
+                                design = ~ Group)
+  dds <- DESeq(dds)
+  
+  de <- results(dds, contrast = c("Group", "Fos", "Not_fos"))
+  de_table <- de %>%
+    as.data.frame() %>%
+    rownames_to_column("Gene") %>%
+    arrange(padj)
+  
+  write_tsv(de_table, paste("../output/figure_7_main_de_fos_", cell_type, ".txt", sep = ""))
+  
+  # number of up and down-regulated significant genes
+  p_cutoff <- 0.01
+  bm_cutoff <- 50
+  print(
+    de_table %>%
+      filter(padj < p_cutoff, baseMean > bm_cutoff) %>%
+      group_by(log2FoldChange > 0) %>%
+      count()
+  )
+  
+  return(de_table)
+}
+```
+
+
+Run DEseq2 and output DE genes
+
+```{r message = FALSE, warning = FALSE}
+cts <- c("granule", "glia", "basket")
+de_fos <- lapply(
+  cts,
+  getDE,
+  counts = counts,
+  meta = meta
+)
+names(de_fos) <- cts
+```
+
+MA-plots
+
+```{r warning = FALSE}
+lapply(
+  cts,
+  function(cell_type) {
+    p <- plotMACustom(
+      de_fos[[cell_type]], 
+      markers = tibble(
+        Marker = c("FOS", "FOSB", "NPAS4", "HSPA1A", "HSPB1"),
+        Direction = rep("Up", 5)
+        ),
+      point_size = 2,
+      sig_col = "red",
+      ylims = c(-5, 10.5),
+      xlims = c(0.2, 200000)
+      )
+    print(p)
+    ggsaveToPdf(paste("../figures/figure_7_main_ma_fos", cell_type, ".pdf", sep = ""))
+  }
+)
+```
+
+
+### GO analysis
+
+Run for granule cell induced genes only
+First run for all three ontologies and write output to disk
+
+```{r}
+fos_up_genes <- de_fos[["granule"]] %>%
+  filter(padj < 0.01, baseMean > 50, log2FoldChange > 0) %>%
+  pull(Gene)
+# run for all three ontologies and write output to disk
+ego <- enrichGOCustom(fos_up_genes, ontology = "ALL")
+write_tsv(ego %>% as.data.frame(),
+          "../output/figure_7_main_go_granule_fos_up.txt")
+
+# run for biologicaly process only for plotting
+ego <- enrichGOCustom(fos_up_genes, ontology = "BP")
+# save object to disk
+write_rds(ego, "../data_clean/figure_7_main_ego_bp.RDS")
+```
+
+
+Make CNET plot
+```{r}
+# ego <- read_rds("../data_clean/figure_7_main_ego_bp.RDS")
+cnetplot(ego)
+ggsaveToPdf("../figures/figure_7_main_go_cnet.pdf")
+```
+
+
+## Heatmap to accompany IGV tracks
+
+Load counts and define metadata for human samples
+
+```{r message = FALSE}
+counts <- read_tsv("../data/human_all_wg_counts.txt")
+
+meta_igv <- tibble(
+  Sample = colnames(counts)[-1]
+) %>%
+  separate(Sample, into = c("ID", "Donor", "Cell_type"), sep = "_", remove = FALSE) %>%
+  mutate(Donor_ct = paste(Donor, Cell_type, sep = "_"))
+```
+
+
+Calculate fpkms (rpkms) for visualization.
+
+```{r message = FALSE, warning = FALSE}
+# read in gene lengths
+lengths <- read_tsv("../data/ref/hg38_refseq_wg_longest.txt", col_names = c("Gene", "Length"))
+# calculate rpkms
+rpkms <- getNormCounts(counts, lengths)
+# reorder samples for visualization
+donors <- c("wi", "vm", "zh", "xk", "wc", "wl", "sg", "lt", "ke",
+            "tm", "wo", "pk", "or", "ko", "kq", "ai")
+sample_order <- tibble(
+  Cell_type = c(rep("granule", 16), rep("glia", 14), rep("basket", 16)),
+  Donor = c(donors, donors[!(donors %in% c("wc", "wo"))], donors)
+) %>%
+  mutate(Donor_ct = paste(Donor, Cell_type, sep = "_")) %>%
+  select(Donor_ct) %>%
+  left_join(meta_igv, by = "Donor_ct")
+rpkms_ordered <- rpkms[, sample_order$Sample]
+```
+
+Genes to visualize
+
+```{r}
+# define genes
+genes_granule <- "FAT2"
+genes_ieg <- c("ARC", "EGR1", "FOS", "FOSB", "JUN", "NR4A2")
+genes_other_induced <- c("DUSP1", "SLC2A3", "BCAS2")
+genes_act_astro <- c("GFAP", "S100B")
+igv_genes <- c( genes_granule, genes_ieg, genes_other_induced, genes_act_astro )
+
+rpkms_for_igv <- rpkms_ordered[igv_genes, ] %>% t()
+```
+
+Specify colors for heatmap:
+
+```{r}
+# palette for rpkms
+cor_col <- colorRampPalette( brewer.pal(9, 'YlOrRd') )(100)
+cor_breaks <- seq(-2, 12, length.out = 101)
+
+# sidebar for heatmap.2
+cell_type_cols <- c(
+  Granule = "#33A02C",
+  Glia = "blue",
+  Basket = "#FF6600"
+)
+
+sidebar_row <- rep(cell_type_cols, c(16, 14, 16))
+sidebar_col <- c(
+  cell_type_cols["Granule"],
+  rep( "#990099", length( genes_ieg ) ),
+  rep( "plum1", length( genes_other_induced ) ),
+  rep( cell_type_cols["Glia"], length( genes_act_astro ) )
+)
+```
+
+Plot heatmap:
+
+```{r warning=FALSE}
+pdf("../figures/figure_7_main_heatmap_fos_for_igv.pdf", width = 11, height = 8.5)
+hm <- heatmap.2(
+  rpkms_for_igv,
+  dendrogram = "none", Rowv = FALSE, Colv = FALSE, # no dendrogram, no reordering
+  col = cor_col, breaks = cor_breaks,  # colors for values
+  RowSideColors = sidebar_row, ColSideColors = sidebar_col,  # sidebar
+  scale = "none", trace = "none",
+  key.title = NA, key.ylab = NA,
+  cexRow = 1, cexCol = 1, margins = c(2, 2),
+  labCol = FALSE, labRow = FALSE, symkey = F,
+  keysize = 1, key.par = list(mar = c(4, 2, 1, 1))
+)
+dev.off()
+
+# and display in this file
+eval(hm$call)
+```
+
+
+
+
+## Permutation analysis
+
+How many genes could come up as significant if performed DE analysis of any 3 individuals against the other 13? Test for all 560 combinations of 3 donors against the other 13.
+
+Define combinations
+```{r}
+# create all combinations of 3 donors from the group of 16
+combs <- combn(unique(meta$Donor), 3) %>%
+  t() %>%
+  as.data.frame()
+colnames(combs) <- c("Donor_1", "Donor_2", "Donor_3")
+
+# how many combinations?
+nrow(combs)
+```
+
+For each combination of 3 donors in group A and 13 donors in group B, perform differential expression analysis and report number of genes that pass significance (padj < 0.01, baseMean > 50).
+
+```{r message = FALSE, warning = FALSE}
+getNDESigForPerm <- function(meta, counts, donors, p_cutoff = 0.01, bm_cutoff = 50) {
+  donors_sub <- unlist(donors)
+  meta_sub <- meta %>%
+    mutate(Group = ifelse(Donor %in% donors_sub,
+                          "A", "B"))
+  counts_sub <- counts %>%
+    select(Gene, meta_sub$Sample)
+  
+  # deseq
+  dds <- DESeqDataSetFromMatrix(counts_sub %>% column_to_rownames("Gene"), 
+                                meta_sub %>% column_to_rownames("Sample"),
+                                design = ~ Group)
+  dds <- DESeq(dds)
+  
+  de <- results(dds, contrast = c("Group", "A", "B"))
+  de_table <- de %>%
+    as.data.frame() %>%
+    rownames_to_column("Gene")
+  
+  # number of differentially expressed genes
+  n_sig <- de_table %>%
+    filter(padj < p_cutoff, baseMean > bm_cutoff) %>%
+    nrow
+  
+  return(n_sig)
+}
+
+meta_sub <- meta %>% filter(Cell_type == "granule")
+comb_n_sig <- apply(combs, 1, 
+                    function(x) 
+                      getNDESigForPerm(meta_sub, counts, x)
+                    )
+```
+
+
+Add number of significant genes as column to combination metadata and save to disk.
+
+```{r}
+n_fos_donors <- apply(combs, 1, function(x) length(intersect(x, fos_donors)))
+combs_sig <- combs %>%
+  mutate(n_fos = n_fos_donors) %>%
+  mutate(n_sig = comb_n_sig) %>%
+  arrange(desc(n_sig))
+write_tsv(combs_sig, "../output/figure_7_s1_permutation_n_sig.txt")
+```
+
+
+Plot histogram of significant genes
+
+```{r message = FALSE}
+combs_sig <- read_tsv("../output/figure_7_s1_permutation_n_sig.txt")
+ggplot(combs_sig, aes(n_sig)) +
+  geom_histogram(bins = 100) +
+  geom_vline(xintercept = 234, color = "red", alpha = 0.5, linetype = 2) +
+  theme_bw()
+ggsaveToPdf("../figures/figure_7_s1_permutation_histogram.pdf")
+
+combs_sig %>%
+  group_by(n_sig > 50, n_sig >= 234, n_fos >= 2) %>%
+  count()
+```
+
+
+Half of the combinations that yield 50 or more DE genes contain at least 2 donors with fos gene expression. Why are the others coming up? Check age.
+
+```{r}
+# create age lookup table
+donor_ages <- meta %>% filter(Cell_type == "granule") %>% pull(Age)
+names(donor_ages) <- meta %>% filter(Cell_type == "granule") %>% pull(Donor)
+
+# add ages of 3 donors
+# calculate median age of 3 donors and median age of other 13 donors
+# calculate difference in age
+combs_sig_annot <- combs_sig %>%
+  mutate_if(is.factor, as.character) %>%
+  mutate(Age_1 = donor_ages[Donor_1]) %>%
+  mutate(Age_2 = donor_ages[Donor_2]) %>%
+  mutate(Age_3 = donor_ages[Donor_3]) %>%
+  rowwise() %>%
+  mutate(Age_median = median(c(Age_1, Age_2, Age_3))) %>%
+  mutate(Age_median_others = median(
+    donor_ages[!(names(donor_ages) %in% c(Donor_1, Donor_2, Donor_3))]
+    )
+  ) %>%
+  mutate(Age_diff = Age_median_others - Age_median) %>%
+  mutate(Sig_group = ifelse(n_sig >= 234, TRUE, FALSE)) %>%
+  mutate(Fos_group = ifelse(n_fos >= 2, TRUE, FALSE))
+```
+
+
+Plot histogram of age difference. Looks like most of the non-fos combinations can be explained by groups containing very young or very old donors, so the significant genes likely represent aging genes.
+
+```{r}
+ggplot(combs_sig_annot %>% filter(!Fos_group), aes(Age_diff)) +
+  geom_histogram() +
+  facet_grid(Sig_group ~ ., scales = "free_y") +
+  theme_bw()
+ggsaveToPdf("../figures/figure_7_s1_permutation_sig_age_diff.pdf")
+```
+
+Plot as violin plot
+
+```{r}
+ggplot(combs_sig_annot %>% filter(!Fos_group), aes(x = Sig_group, y = Age_diff)) +
+  geom_violin(alpha = 0.5) +
+  geom_beeswarm(aes(color = Sig_group), alpha = 0.5, cex = 0.8, size = 1.4) +
+  theme_bw()
+ggsaveToPdf("../figures/figure_7_s1_permutation_sig_age_diff_violin.pdf")
+```
+
+
+
+
+

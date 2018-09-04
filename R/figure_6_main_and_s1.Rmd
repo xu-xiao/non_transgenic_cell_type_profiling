@@ -1,0 +1,377 @@
+---
+title: "R code for Figure 6 main and figure supplement 1 - Do known clinical factors impact gene expression?"
+author: "Xiao Xu (xxu@rockefeller.edu)"
+date: "July 2018"
+output: 
+  html_document:
+    toc: yes
+  html_notebook:
+    toc: yes
+---
+
+This is an [R Markdown](http://rmarkdown.rstudio.com) Notebook. This notebook contains R code for figures and analyses related to Figure 6 main and figure suppelement 1 in the manuscript:
+
+Xu X, Stoyanova EI, Lemiesz A, Xing J, Mash DC, Heintz N (2018). Species and Cell-Type Properties of Classically Defined Human and Rodent Neurons and Glia.
+
+Specifically, this workflow will analyze the relationship between known clinical factors and interindividual differences in gene expression. It will also generate all panels in Figure 6 main and figure supplement 1 except for the IGV tracks.
+
+Load libraries and functions:
+
+```{r warning = FALSE, message = FALSE}
+# source custom functions
+source("functions.R")
+
+# libraries for gene expression analysis
+library(DESeq2)
+
+# libraries for heatmaps and colors
+library(RColorBrewer)
+library(gplots)
+
+# for GO analysis
+library(org.Hs.eg.db)
+library(clusterProfiler)
+
+# work in the tidyverse
+library(tidyverse)
+```
+
+
+## Heatmap to accompany IGV tracks
+
+Load counts and metadata for human samples
+
+```{r message = FALSE}
+counts <- read_tsv("../data/human_all_wg_counts.txt")
+meta <- read_tsv("../data/human_metadata.txt")
+```
+
+Look at effect of post-mortem delay (PMD), gender, and age across all samples or for each cell type individually.
+
+For all comparisons, set p-adjusted value threshold for significance at p < 0.01 and require a baseMean of at least 50 to exclude biologically unmeaningful changes.
+
+```{r}
+p_cutoff <- 0.01
+bm_cutoff <- 50
+```
+
+Custom function for performing differential expression analysis for each condition
+
+```{r}
+getDEForCondition <- function(counts, meta, condition, p_cutoff, bm_cutoff) {
+  dds <- DESeqDataSetFromMatrix(counts %>% column_to_rownames("Gene"),
+                                meta %>% column_to_rownames("Sample"),
+                                design = as.formula(paste("~ ", condition, sep = "")))
+  dds <- DESeq(dds)
+  
+  de <- results(dds)
+  de_table <- de %>%
+    as.data.frame() %>%
+    rownames_to_column("Gene")
+  
+  # how many genes are significant by adjusted p-value and basemean cutoff?
+  print(  nrow( de_table %>% filter(padj < p_cutoff, baseMean > bm_cutoff) ))
+
+  return(de_table)
+}
+```
+
+
+DE for each conditon using all samples
+
+```{r message = FALSE, warning = FALSE}
+conditions <- c("PMD", "Gender", "Age")
+
+de_all <- lapply(conditions,
+                 function(x) {
+                   # perform differential expression
+                   de_table <- getDEForCondition(counts, meta, x, p_cutoff, bm_cutoff)
+                   # save results  by outputting to file
+                   write_tsv(de_table, 
+                             paste("../output/figure_6_main_de_all_", 
+                                   tolower(x), ".txt", sep = ""))
+                   # and in a list
+                   return(de_table)
+                   })
+names(de_all) <- conditions
+
+# save results for later use in R
+write_rds(de_all, "../data_clean/figure_6_main_de_all.RDS")
+```
+
+DE for each condition and each cell type
+
+```{r message = FALSE, warning = FALSE}
+cell_types <- unique(meta$Cell_type)
+
+de_by_ct <- lapply(conditions,
+                   function(x) {
+                     de_ct <- lapply(cell_types, 
+                                     function(y) {
+                                       meta_sub <- meta %>%
+                                         filter(Cell_type == y)
+                                       counts_sub <- counts %>%
+                                         select(Gene, meta_sub$Sample)
+                                       de_table <- getDEForCondition(
+                                         counts_sub,
+                                         meta_sub,
+                                         x,
+                                         p_cutoff,
+                                         bm_cutoff
+                                         )
+                       # save results  by outputting to file
+                       write_tsv(de_table, 
+                                 paste("../output/figure_6_main_de_", 
+                                       y, "_", tolower(x), ".txt", sep = ""))
+                       # and in a list
+                       return(de_table)
+                     })
+                     names(de_ct) <- cell_types
+                     return(de_ct)
+                   })
+names(de_by_ct) <- conditions
+
+# save results for later use in R
+write_rds(de_all, "../data_clean/figure_6_de_by_ct.RDS")
+```
+
+
+
+
+## Plot normalized counts by condition
+
+Read in normalized counts from Figure 5
+
+```{r message = FALSE}
+rld_table <- read_rds("../data_clean/figure_5_main_human_all_norm_rld.RDS") %>%
+  assay() %>%
+  as.data.frame() %>%
+  rownames_to_column("Gene")
+```
+
+
+
+### Gender
+
+Male and cell-type specific
+
+```{r warning = FALSE}
+# male and basket cell specific
+plotNormCounts(rld_table, meta, "GYG2P1", "Gender")
+ggsaveToPdf("../figures/figure_6_main_gender_basket.pdf")
+
+# male and glial-specific
+plotNormCounts(rld_table, meta, "LINC00278", "Gender")
+ggsaveToPdf("../figures/figure_6_s1_gender_glia.pdf")
+
+# male and granule and glial-specific
+plotNormCounts(rld_table, meta, "PRKY", "Gender")
+ggsaveToPdf("../figures/figure_6_s1_gender_granule.pdf")
+```
+
+Y-chromosome genes that are male specific but not cell type specific
+
+```{r warning = FALSE}
+# TTTY15 and USP9Y are located next to GYG2P1
+plotNormCounts(rld_table, meta, "TTTY15", "Gender")
+ggsaveToPdf("../figures/figure_6_s1_gender_general_ttty15.pdf")
+plotNormCounts(rld_table, meta, "USP9Y", "Gender")
+ggsaveToPdf("../figures/figure_6_s1_gender_general_usp9y.pdf")
+
+# ZFY is located next to LINC00278
+plotNormCounts(rld_table, meta, "ZFY", "Gender")
+ggsaveToPdf("../figures/figure_6_s1_gender_general_zfy.pdf")
+```
+
+The related gene GYG2 is enriched in glia and does not exhibit gender specific expression.
+```{r warning = FALSE}
+plotNormCounts(rld_table, meta, "GYG2", "Gender")
+ggsaveToPdf("../figures/figure_6_s1_gender_control_gyg2.pdf")
+```
+
+
+## Age
+
+```{r}
+plotNormCounts(rld_table, meta, "AQP7", "Age")
+ggsaveToPdf("../figures/figure_6_main_aging_granule.pdf")
+plotNormCounts(rld_table, meta, "ASIC1", "Age")
+ggsaveToPdf("../figures/figure_6_main_aging_basket.pdf")
+plotNormCounts(rld_table, meta, "ROBO2", "Age")
+ggsaveToPdf("../figures/figure_6_main_aging_glia.pdf")
+```
+
+
+## PMD
+
+```{r}
+plotNormCounts(rld_table, meta, "FOSB", "PMD")
+ggsaveToPdf("../figures/figure_6_s1_pmd_granule.pdf")
+plotNormCounts(rld_table, meta, "KIF19", "PMD")
+ggsaveToPdf("../figures/figure_6_s1_pmd_glia.pdf")
+```
+
+
+## Aging analysis
+
+Load aging differentially expressed genes
+
+```{r message = FALSE}
+de_aging <- list(
+  all = read_tsv("../output/figure_6_main_de_all_Age.txt"),
+  granule = read_tsv("../output/figure_6_main_de_granule_Age.txt"),
+  basket = read_tsv("../output/figure_6_main_de_basket_Age.txt"),
+  glia = read_tsv("../output/figure_6_main_de_glia_Age.txt")
+)
+```
+
+Create table showing overlap of aging genes between different condtions
+
+```{r}
+# cutoffs for all condtions
+p_cutoff <- 0.01
+bm_cutoff <- 50
+
+# for each cell type, get list of significant aging genes
+sig_aging <- lapply(
+  de_aging,
+  function(x) x %>% filter(padj < p_cutoff, baseMean > bm_cutoff)
+)
+# split into aging up and down regulated
+sig_aging_dir <- deUpAndDown(sig_aging)
+
+# get intersection table across conditions
+intersectAcrossConditons(sig_aging_dir)
+```
+
+Plot heatmap for aging genes that are significant across all condtions
+
+```{r}
+sigExpToHeatmap(rld_table, de_aging[["all"]], order(meta$Age),
+                "all aging genes in all",
+                outfile = "../figures/figure_6_main_heatmap_aging_all.pdf")
+```
+
+Plot heatmap for cell-type specific aging genes. Also plot these genes in other two cell types to see if can see pattern of aging changes.
+
+```{r warning = FALSE}
+lapply(
+  c("granule", "basket", "glia"),
+  function(ct) {
+    meta_sub <- meta %>% filter(Cell_type == ct)
+    rld_table_sub <- rld_table %>%
+      select(Gene, meta_sub$Sample)
+    # save heatmap
+    filename <- paste("../figures/figure_6_main_heatmap_aging_", ct, ".pdf")
+    sigExpToHeatmap(rld_table_sub, de_aging[[ct]], order(meta_sub$Age),
+                    paste(ct, "aging", sep = " "),
+                    outfile = filename)
+    return(NULL)
+  })
+```
+
+
+Perform GO analysis for up and down regulated aging genes for each condition (all ontologies and write results to disk)
+
+```{r message = FALSE, warning = FALSE}
+lapply(
+  names(sig_aging_dir),
+  function(x) {
+    ego <- enrichGOCustom(sig_aging_dir[[x]], ontology = "ALL")
+    write_tsv(ego %>% as.data.frame(),
+              paste("../output/figure_6_main_go_aging_", x, ".txt", sep = ""))
+    return(NULL)
+    }
+  )
+```
+
+Perform GO analysis for biological process for only categories that have significant GO terms associated (down-regulated genes for granule, basket, glia) and make cnet plot.
+
+```{r message = FALSE, warning = FALSE}
+conds <- c("granule_down", "basket_down", "glia_down")
+ego_aging <- lapply(
+  conds,
+  function(x) ego <- enrichGOCustom(sig_aging_dir[[x]], ontology = "BP")
+)
+names(ego_aging) <- conds
+write_rds(ego_aging, "../data_clean/figure_6_main_ego_aging.RDS")
+```
+
+Plots
+
+```{r}
+# ego_aging <- read_rds("../data_clean/figure_6_main_ego_aging.RDS")
+cnetplot(ego_aging[["granule_down"]])
+ggsaveToPdf("../figures/figure_6_main_go_granule_down.pdf")
+cnetplot(ego_aging[["basket_down"]])
+ggsaveToPdf("../figures/figure_6_main_go_basket_down.pdf")
+cnetplot(ego_aging[["glia_down"]])
+ggsaveToPdf("../figures/figure_6_main_go_glia_down.pdf")
+```
+
+
+Calculate correlation between age and aging genes for each cell type. Also do this for other two cell types to see if aging genes in one cell type are also age regulated in other cell types.
+
+```{r warning = FALSE}
+getAbsCorWithAge <- function(exp_table, meta, gene_list) {
+  exp_table_sub <- exp_table %>%
+    select(Gene, meta$Sample) %>%
+    filter(Gene %in% gene_list) %>%
+    column_to_rownames("Gene") %>%
+    t() %>%
+    as.data.frame() %>%
+    rownames_to_column("Sample") %>%
+    left_join(meta %>% select(Sample, Age), by = "Sample") %>%
+    column_to_rownames("Sample")
+  
+  cor_w_age <- apply(exp_table_sub %>% select(-Age), 2,
+                     function(x) abs(cor(x, exp_table_sub$Age)  ))
+}
+
+
+age_cors <- lapply(
+  c("granule", "basket", "glia"),
+  function(x) {
+    sub_cors <- lapply(
+      c("granule", "basket", "glia"),
+      function(y) {
+        meta_sub <- meta %>% filter(Cell_type == y)
+        sig_genes <- de_aging[[x]] %>%
+          filter(padj < p_cutoff, baseMean > bm_cutoff) %>%
+          pull(Gene)
+        
+        return( getAbsCorWithAge(rld_table, meta_sub, sig_genes) )
+        }
+    )
+    names(sub_cors) <- c("granule", "basket", "glia")
+    return(sub_cors)
+  })
+names(age_cors) <- c("granule", "basket", "glia")
+
+age_cors_melt <- data.frame(matrix(unlist(age_cors[["granule"]]), ncol=3)) %>%
+  mutate(Aging_sig = "granule") %>%
+  bind_rows(data.frame(matrix(unlist(age_cors[["basket"]]), ncol=3)) %>%
+              mutate(Aging_sig = "basket")) %>%
+  bind_rows(data.frame(matrix(unlist(age_cors[["glia"]]), ncol=3)) %>%
+              mutate(Aging_sig = "glia")) %>%
+  rename(granule = X1, basket = X2, glia = X3) %>%
+  gather(granule, basket, glia, key = "In_cell_type", value = "R") %>%
+  mutate(Aging_sig = factor(Aging_sig, levels = c("granule", "basket", "glia"))) %>%
+  mutate(In_cell_type = factor(In_cell_type, levels = c("granule", "basket", "glia")))
+```
+
+Boxplots of correlation
+```{r}
+ggplot(age_cors_melt, aes(x = In_cell_type, y = R)) +
+  geom_boxplot(aes(color = In_cell_type)) +
+  facet_wrap(~ Aging_sig) +
+  scale_color_manual(values = c("green", "orange", "blue")) +
+  scale_y_continuous(limits = c(0, 1)) +
+  stat_summary(geom="text", fun.y = median,
+               aes(label=sprintf("%1.2f", ..y..)),
+               position=position_nudge(y=0.03), size=3.5) +
+  theme_bw()
+ggsaveToPdf("../figures/figure_6_s1_aging_cor.pdf", w = 8, h = 4)
+```
+
+

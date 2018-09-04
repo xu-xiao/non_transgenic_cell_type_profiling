@@ -1,0 +1,55 @@
+---
+title: "ATAC Analysis"
+author: "Elitsa Stoyanova"
+output: html_notebook
+---
+
+Necessary libraries 
+```{r}
+library(DiffBind)
+library(tidyverse)
+```
+
+
+Peak calling
+```
+macs2 callpeak --nomodel -t rmdup.bam -f BAMPE -n name_ --keep-dup all --call-summits -g mm -B -q 0.01 --outdir folder/ &
+
+```
+
+Differential accessibility analysis
+```{r, eval=FALSE}
+samples = read.csv("samples.csv", header = TRUE)
+dev = dba(sampleSheet = samples)
+dev = dba.count(dev, summits=250)
+# example contrast
+dev.contrast = dba.contrast(devh, group1 = devh$masks$Granule, group2 = devh$masks$Basket, minMembers=2,
+                            name1 = "Granule", name2 = "Basket")
+dev.analyzed = dba.analyze(dev.contrast, method = DBA_DESEQ2)
+dev.DB = dba.report(dev.analyzed)
+dev.df = as.data.frame(dev.DB)
+write.table(dev.df, "humangranule.vs.basket.diffbindpeaks.txt", quote = FALSE,
+            col.names = TRUE, row.names = FALSE, sep = "\t")
+
+# filtering peaks over 2 fold change for downstream analysis
+granule.peaks = dev.df %>% dplyr::filter(Fold > 2)
+basket.peaks = dev.df %>% dplyr::filter(Fold < -2)
+
+```
+
+```
+# bash
+# Metagene example code
+computeMatrix scale-regions -R regions.bed regions2.bed -S hg38.phastCons100way.bw -b 5000 -a 5000 --regionBodyLength 5000 -bs 250 --skipZeros -o mat.gz 
+plotProfile -m mat.gz -o figure.pdf --plotFileFormat pdf  --colors red blue
+
+# for centering around the TSS used this
+computeMatrix reference-point --referencePoint TSS ...
+```
+
+Homer TF analysis
+```
+findMotifsGenome.pl <peak/BED file> <genome> <output directory> -size given
+```
+
+
